@@ -67,16 +67,11 @@ function validateAvailability(availability = []) {
   }
 
   return availability.map((slot, index) => {
-    const day = normalizeString(slot.day).toLowerCase();
     const errors = {};
 
-    if (
-      !['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'].includes(
-        day
-      )
-    ) {
-      errors[`availability.${index}.day`] =
-        'Availability day must be monday, tuesday, wednesday, thursday, friday, saturday, or sunday.';
+    const date = new Date(slot.date);
+    if (!slot.date || isNaN(date.getTime())) {
+      errors[`availability.${index}.date`] = 'Availability date must be a valid date (e.g. 2026-04-26).';
     }
 
     const startTime = normalizeString(slot.startTime);
@@ -95,7 +90,7 @@ function validateAvailability(availability = []) {
     }
 
     return {
-      day,
+      date,
       startTime: validateTime(startTime, `availability.${index}.startTime`),
       endTime: validateTime(endTime, `availability.${index}.endTime`),
       isAvailable: typeof slot.isAvailable === 'boolean' ? slot.isAvailable : true,

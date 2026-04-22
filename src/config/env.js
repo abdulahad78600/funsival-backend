@@ -2,10 +2,6 @@ const dotenv = require('dotenv');
 
 dotenv.config({ quiet: true });
 
-function parseBoolean(value) {
-  return String(value).toLowerCase() === 'true';
-}
-
 function normalizeString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -14,7 +10,7 @@ function normalizeSecret(value) {
   return typeof value === 'string' ? value.replace(/\s+/g, '') : '';
 }
 
-const requiredEnvironmentVariables = ['MONGODB_URI', 'JWT_SECRET'];
+const requiredEnvironmentVariables = ['MONGODB_URI', 'JWT_SECRET', 'RESEND_API_KEY'];
 const missingEnvironmentVariables = requiredEnvironmentVariables.filter(
   (variableName) => !process.env[variableName]
 );
@@ -42,12 +38,6 @@ module.exports = {
   passwordResetTokenTtlMinutes: process.env.PASSWORD_RESET_TOKEN_TTL_MINUTES
     ? Number(process.env.PASSWORD_RESET_TOKEN_TTL_MINUTES)
     : 15,
-  mail: {
-    host: normalizeString(process.env.SMTP_HOST),
-    port: process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : 587,
-    secure: parseBoolean(process.env.SMTP_SECURE),
-    user: normalizeString(process.env.SMTP_USER),
-    pass: normalizeSecret(process.env.SMTP_PASS),
-    from: normalizeString(process.env.MAIL_FROM || process.env.SMTP_USER),
-  },
+  resendApiKey: normalizeSecret(process.env.RESEND_API_KEY),
+  mailFrom: normalizeString(process.env.MAIL_FROM),
 };

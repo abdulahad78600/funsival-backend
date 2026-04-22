@@ -50,9 +50,26 @@ async function createListing(payload, userId) {
   return listing.toJSON();
 }
 
-async function getListingsForUser(userId) {
-  const listings = await Listing.find({ createdBy: userId }).sort({ createdAt: -1 });
-  return listings.map((listing) => listing.toJSON());
+async function getListingsForUser(userId, { page = 1, limit = 10 } = {}) {
+  const skip = (page - 1) * limit;
+  const filter = { createdBy: userId };
+
+  const [listings, total] = await Promise.all([
+    Listing.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+    Listing.countDocuments(filter),
+  ]);
+
+  return {
+    listings: listings.map((listing) => listing.toJSON()),
+    pagination: {
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+      hasNextPage: page < Math.ceil(total / limit),
+      hasPrevPage: page > 1,
+    },
+  };
 }
 
 async function getListingForUser(listingId, userId) {

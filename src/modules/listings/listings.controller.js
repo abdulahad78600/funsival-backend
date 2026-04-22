@@ -21,14 +21,15 @@ const createListingHandler = asyncHandler(async (req, res) => {
 });
 
 const getMyListingsHandler = asyncHandler(async (req, res) => {
-  const listings = await getListingsForUser(req.user.id);
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+
+  const result = await getListingsForUser(req.user.id, { page, limit });
 
   res.status(200).json({
     success: true,
     message: 'Listings fetched successfully.',
-    data: {
-      listings,
-    },
+    data: result,
   });
 });
 

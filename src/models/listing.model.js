@@ -132,9 +132,8 @@ const placeLocationSchema = new mongoose.Schema(
 
 const availabilitySlotSchema = new mongoose.Schema(
   {
-    day: {
-      type: String,
-      enum: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'],
+    date: {
+      type: Date,
       required: true,
     },
     startTime: {
