@@ -1,5 +1,7 @@
 const asyncHandler = require('../../utils/async-handler');
+const ApiError = require('../../utils/api-error');
 const { validateListingId } = require('./listings.validation');
+const { getUploadedListingImages } = require('./listing-images');
 const {
   createListing,
   getListingsForUser,
@@ -7,6 +9,23 @@ const {
   updateListingForUser,
   deleteListingForUser,
 } = require('./listings.service');
+
+const uploadListingImagesHandler = asyncHandler(async (req, res) => {
+  const uploadedImages = getUploadedListingImages(req.files);
+
+  if (uploadedImages.length === 0) {
+    throw new ApiError(400, 'At least one image is required.');
+  }
+
+  res.status(201).json({
+    success: true,
+    message: 'Listing images uploaded successfully.',
+    data: {
+      images: uploadedImages,
+      photos: uploadedImages.map((image) => image.path),
+    },
+  });
+});
 
 const createListingHandler = asyncHandler(async (req, res) => {
   const listing = await createListing(req.body, req.user.id);
@@ -70,6 +89,7 @@ const deleteListingHandler = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  uploadListingImagesHandler,
   createListingHandler,
   getMyListingsHandler,
   getListingByIdHandler,

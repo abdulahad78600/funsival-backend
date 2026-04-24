@@ -34,6 +34,20 @@ function errorHandler(error, req, res, next) {
     return;
   }
 
+  if (error.name === 'MulterError') {
+    const uploadErrorMessages = {
+      LIMIT_FILE_COUNT: 'You can upload up to 10 listing images at a time.',
+      LIMIT_FILE_SIZE: 'Each listing image must be 5 MB or smaller.',
+      LIMIT_UNEXPECTED_FILE: 'Unexpected file field. Use the `images` field for uploads.',
+    };
+
+    res.status(400).json({
+      success: false,
+      message: uploadErrorMessages[error.code] || 'Listing image upload failed.',
+    });
+    return;
+  }
+
   if (error.name === 'CastError') {
     res.status(400).json({
       success: false,

@@ -1,6 +1,11 @@
 const Listing = require('../../models/listing.model');
 const ApiError = require('../../utils/api-error');
 const { validateListingPayload } = require('./listings.validation');
+const {
+  deleteLocalListingPhotos,
+  findUnusedLocalListingPhotos,
+  serializeListingRecord,
+} = require('./listing-images');
 
 function mergeListingPayload(existingListing, payload) {
   const currentListing = existingListing.toObject({ depopulate: true });
@@ -39,6 +44,15 @@ function mergeListingPayload(existingListing, payload) {
   };
 }
 
+async function cleanupUnusedListingPhotos(photos = []) {
+  try {
+    const unusedPhotos = await findUnusedLocalListingPhotos(photos);
+    await deleteLocalListingPhotos(unusedPhotos);
+  } catch (error) {
+    console.error('Failed to clean up listing images.', error);
+  }
+}
+
 async function createListing(payload, userId) {
   const validatedPayload = validateListingPayload(payload);
 
@@ -47,7 +61,7 @@ async function createListing(payload, userId) {
     createdBy: userId,
   });
 
-  return listing.toJSON();
+  return serializeListingRecord(listing.toJSON());
 }
 
 async function getListingsForUser(userId, { page = 1, limit = 10 } = {}) {
@@ -60,7 +74,7 @@ async function getListingsForUser(userId, { page = 1, limit = 10 } = {}) {
   ]);
 
   return {
-    listings: listings.map((listing) => listing.toJSON()),
+    listings: listings.map((listing) => serializeListingRecord(listing.toJSON())),
     pagination: {
       total,
       page,
@@ -79,7 +93,7 @@ async function getListingForUser(listingId, userId) {
     throw new ApiError(404, 'Listing not found.');
   }
 
-  return listing.toJSON();
+  return serializeListingRecord(listing.toJSON());
 }
 
 async function updateListingForUser(listingId, payload, userId) {
@@ -91,11 +105,15 @@ async function updateListingForUser(listingId, payload, userId) {
 
   const mergedPayload = mergeListingPayload(existingListing, payload);
   const validatedPayload = validateListingPayload(mergedPayload);
+  const removedPhotos = existingListing.photos.filter(
+    (photo) => !validatedPayload.photos.includes(photo)
+  );
 
   existingListing.set(validatedPayload);
   await existingListing.save();
+  await cleanupUnusedListingPhotos(removedPhotos);
 
-  return existingListing.toJSON();
+  return serializeListingRecord(existingListing.toJSON());
 }
 
 async function deleteListingForUser(listingId, userId) {
@@ -104,6 +122,8 @@ async function deleteListingForUser(listingId, userId) {
   if (!listing) {
     throw new ApiError(404, 'Listing not found.');
   }
+
+  await cleanupUnusedListingPhotos(listing.photos);
 }
 
 module.exports = {

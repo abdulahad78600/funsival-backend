@@ -171,6 +171,49 @@ Authorization: Bearer <your-jwt-token>
 
 Listings are private and host-only. Every listing is automatically tied to the authenticated host through `createdBy`.
 
+### `POST /api/v1/listings/images`
+
+Upload listing images before creating or updating the listing.
+
+Headers:
+
+```text
+Authorization: Bearer <host-jwt-token>
+Content-Type: multipart/form-data
+```
+
+Form field:
+
+```text
+images=<image-file>
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "message": "Listing images uploaded successfully.",
+  "data": {
+    "images": [
+      {
+        "fileName": "1714060000000-uuid.jpg",
+        "originalName": "cover.jpg",
+        "contentType": "image/jpeg",
+        "size": 245123,
+        "path": "/uploads/listings/1714060000000-uuid.jpg",
+        "url": "https://api.funsival.com/uploads/listings/1714060000000-uuid.jpg"
+      }
+    ],
+    "photos": [
+      "/uploads/listings/1714060000000-uuid.jpg"
+    ]
+  }
+}
+```
+
+Use the returned `photos` values in the listing `photos` array. The backend serves uploaded files from `/uploads/listings/*`.
+
 ### `POST /api/v1/listings`
 
 Headers:
@@ -219,8 +262,8 @@ Authorization: Bearer <host-jwt-token>
     "googleMapsUrl": "https://maps.google.com"
   },
   "photos": [
-    "https://example.com/photos/hike-1.jpg",
-    "https://example.com/photos/hike-2.jpg"
+    "/uploads/listings/1714060000000-uuid.jpg",
+    "/uploads/listings/1714060000001-uuid.jpg"
   ],
   "availability": [
     {
@@ -264,6 +307,7 @@ Add these variables to `.env` to send password reset emails:
 
 ```text
 API_BASE_URL=http://localhost:3000
+FRONTEND_URL=http://localhost:3000
 GOOGLE_CLIENT_ID=your-google-web-client-id
 EMAIL_VERIFICATION_CODE_TTL_MINUTES=10
 PASSWORD_RESET_TOKEN_TTL_MINUTES=15
@@ -274,3 +318,5 @@ SMTP_USER=your-email@example.com
 SMTP_PASS=your-email-app-password
 MAIL_FROM=your-email@example.com
 ```
+
+Set `API_BASE_URL` to your deployed backend domain in production so uploaded listing image URLs point to the correct host.

@@ -1,21 +1,20 @@
 const mongoose = require('mongoose');
 
 const ApiError = require('../../utils/api-error');
+const { normalizeListingPhotoReference } = require('./listing-images');
 
 function normalizeString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function normalizeStringArray(value, fieldName) {
+function normalizeStringArray(value, fieldName, normalizeItem = normalizeString) {
   if (!Array.isArray(value) || value.length === 0) {
     throw new ApiError(400, 'Validation failed.', {
       [fieldName]: `${fieldName} must be a non-empty array.`,
     });
   }
 
-  const normalizedValues = value
-    .map((item) => normalizeString(item))
-    .filter(Boolean);
+  const normalizedValues = value.map((item) => normalizeItem(item)).filter(Boolean);
 
   if (normalizedValues.length === 0) {
     throw new ApiError(400, 'Validation failed.', {
@@ -227,7 +226,7 @@ function validateListingPayload(payload = {}) {
       ...(longitude !== undefined ? { longitude } : {}),
       googleMapsUrl: normalizeString(placeLocation.googleMapsUrl),
     },
-    photos: normalizeStringArray(payload.photos, 'photos'),
+    photos: normalizeStringArray(payload.photos, 'photos', normalizeListingPhotoReference),
     availability: validateAvailability(payload.availability),
     price: {
       amount,

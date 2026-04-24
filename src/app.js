@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
+const path = require('path');
 
 const { nodeEnv, frontendUrl } = require('./config/env');
 const apiRoutes = require('./routes');
@@ -11,26 +12,55 @@ const app = express();
 
 app.disable('x-powered-by');
 
-const allowedOrigins = frontendUrl.split(',').map((o) => o.trim());
+function normalizeOrigin(value) {
+  if (typeof value !== 'string') return '';
+
+  const trimmedValue = value.trim();
+
+  if (!trimmedValue) return '';
+
+  try {
+    return new URL(trimmedValue).origin;
+  } catch {
+    return trimmedValue.replace(/\/+$/, '');
+  }
+}
+
+const allowedOrigins = new Set(
+  frontendUrl
+    .split(',')
+    .map((origin) => normalizeOrigin(origin))
+    .filter(Boolean)
+);
 
 const corsOptions = {
   origin: (origin, callback) => {
     // Allow non-browser clients (Postman, mobile apps, etc.)
     if (!origin) return callback(null, true);
+
+    const normalizedOrigin = normalizeOrigin(origin);
+
     // In development, allow any localhost origin regardless of port
-    if (nodeEnv === 'development' && /^https?:\/\/localhost(:\d+)?$/.test(origin)) {
+    if (nodeEnv === 'development' && /^https?:\/\/localhost(:\d+)?$/.test(normalizedOrigin)) {
       return callback(null, true);
     }
     // Allow VS Code dev tunnel origins in development
-    if (nodeEnv === 'development' && /^https:\/\/[a-z0-9-]+\.devtunnels\.ms$/.test(origin)) {
+    if (
+      nodeEnv === 'development' &&
+      /^https:\/\/[a-z0-9-]+\.devtunnels\.ms$/.test(normalizedOrigin)
+    ) {
       return callback(null, true);
     }
     // Allow ngrok tunnel origins in development
-    if (nodeEnv === 'development' && /^https:\/\/[a-z0-9-]+\.ngrok-free\.app$/.test(origin)) {
+    if (
+      nodeEnv === 'development' &&
+      /^https:\/\/[a-z0-9-]+\.ngrok-free\.app$/.test(normalizedOrigin)
+    ) {
       return callback(null, true);
     }
     // In production, only allow whitelisted origins
-    if (allowedOrigins.includes(origin)) return callback(null, true);
+    if (allowedOrigins.has(normalizedOrigin)) return callback(null, true);
+
     callback(new Error(`CORS: origin '${origin}' is not allowed`));
   },
   credentials: true,
@@ -40,6 +70,7 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
