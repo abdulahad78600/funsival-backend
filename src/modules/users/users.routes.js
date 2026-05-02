@@ -10,7 +10,6 @@ router.post('/preferences', authenticate, savePreferencesHandler);
 router.patch(
   '/provider-profile',
   authenticate,
-  authorizeRoles(USER_ROLES.HOST),
   updateProviderProfileHandler
 );
 

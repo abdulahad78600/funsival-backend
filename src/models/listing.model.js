@@ -255,7 +255,11 @@ const listingSchema = new mongoose.Schema(
     toJSON: {
       transform: (doc, returnedObject) => {
         returnedObject.id = returnedObject._id.toString();
-        returnedObject.createdBy = returnedObject.createdBy.toString();
+        if (returnedObject.createdBy) {
+          returnedObject.createdBy = returnedObject.createdBy.toString();
+        } else {
+          returnedObject.createdBy = null;
+        }
         delete returnedObject._id;
         return returnedObject;
       },

@@ -25,9 +25,7 @@ async function updateProviderProfile(userId, payload) {
     throw new ApiError(404, 'User not found.');
   }
 
-  if (user.role !== USER_ROLES.HOST) {
-    throw new ApiError(403, 'Only providers can update the provider profile.');
-  }
+  // Removed role check to allow all users to update their profile
 
   if (
     validatedPayload.email &&
