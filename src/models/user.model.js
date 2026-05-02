@@ -98,12 +98,7 @@ const userSchema = new mongoose.Schema(
     agencyName: {
       type: String,
       trim: true,
-      required: [
-        function agencyNameRequired() {
-          return this.role === USER_ROLES.HOST;
-        },
-        'Agency name is required for host accounts.',
-      ],
+      // Agency name is now optional for all users
     },
     email: {
       type: String,

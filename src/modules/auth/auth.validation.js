@@ -65,9 +65,7 @@ function validateHostSignupPayload(payload = {}) {
   const { data, errors } = validateCommonSignupFields(payload);
   const agencyName = normalizeString(payload.agencyName);
 
-  if (!agencyName) {
-    errors.agencyName = 'Agency name is required.';
-  } else if (agencyName.length < 2) {
+  if (agencyName && agencyName.length < 2) {
     errors.agencyName = 'Agency name must be at least 2 characters long.';
   }
 
