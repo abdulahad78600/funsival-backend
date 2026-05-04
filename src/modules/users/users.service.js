@@ -91,7 +91,40 @@ async function updateProviderProfile(userId, payload) {
   return user.toJSON();
 }
 
+async function updateUserProfileImage(userId, profileImageUrl) {
+  const user = await User.findById(userId);
+
+  if (!user) {
+    throw new ApiError(404, 'User not found.');
+  }
+
+  const existingProfile = user.providerProfile || {};
+
+  user.providerProfile = {
+    firstName: existingProfile.firstName || '',
+    lastName: existingProfile.lastName || '',
+    phoneNumber: existingProfile.phoneNumber || '',
+    dateOfBirth: existingProfile.dateOfBirth,
+    bio: existingProfile.bio || '',
+    profileImage: profileImageUrl,
+    businessName: existingProfile.businessName || user.agencyName || '',
+    businessType: existingProfile.businessType || '',
+    location: {
+      addressLine1: existingProfile.location?.addressLine1 || '',
+      addressLine2: existingProfile.location?.addressLine2 || '',
+      city: existingProfile.location?.city || user.city || '',
+      state: existingProfile.location?.state || '',
+      postalCode: existingProfile.location?.postalCode || '',
+      country: existingProfile.location?.country || '',
+    },
+  };
+
+  await user.save();
+  return user.toJSON();
+}
+
 module.exports = {
   saveUserPreferences,
   updateProviderProfile,
+  updateUserProfileImage,
 };
