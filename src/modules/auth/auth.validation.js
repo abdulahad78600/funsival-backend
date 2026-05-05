@@ -75,7 +75,7 @@ function validateHostSignupPayload(payload = {}) {
 
   return {
     ...data,
-    agencyName,
+    ...(agencyName ? { agencyName } : {}),
   };
 }
 

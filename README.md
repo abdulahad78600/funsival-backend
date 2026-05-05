@@ -54,9 +54,10 @@ The signup response message is: `Verification OTP sent to your email.`
 
 ### `POST /api/v1/auth/signup/host`
 
+`agencyName` is optional during host signup.
+
 ```json
 {
-  "agencyName": "Skyline Events",
   "email": "host@example.com",
   "city": "Karachi",
   "password": "password123",
@@ -106,24 +107,21 @@ For a verified `user`, the response becomes:
 
 ### `POST /api/v1/auth/google`
 
-Send the Google `idToken` from your frontend. For first-time Google accounts, include the extra profile fields required by your app.
+Send the Google `idToken` from your frontend. `role`, `city`, and `agencyName` are optional. If omitted, the account defaults to the `user` role.
 
 ```json
 {
   "idToken": "google-id-token-from-frontend",
-  "role": "user",
-  "city": "Lahore"
+  "role": "user"
 }
 ```
 
-For first-time host sign-in with Google:
+If you want to create a host account with Google:
 
 ```json
 {
   "idToken": "google-id-token-from-frontend",
-  "role": "host",
-  "city": "Karachi",
-  "agencyName": "Skyline Events"
+  "role": "host"
 }
 ```
 

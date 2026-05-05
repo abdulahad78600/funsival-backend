@@ -124,8 +124,13 @@ const userSchema = new mongoose.Schema(
     },
     city: {
       type: String,
-      required: [true, 'City is required.'],
       trim: true,
+      required: [
+        function cityRequired() {
+          return !this.authProviders || this.authProviders.includes(AUTH_PROVIDERS.LOCAL);
+        },
+        'City is required.',
+      ],
     },
     password: {
       type: String,
