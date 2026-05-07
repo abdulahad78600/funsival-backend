@@ -43,4 +43,9 @@ module.exports = {
   brevoApiKey: normalizeSecret(process.env.BREVO_API_KEY),
   mailFrom: normalizeString(process.env.MAIL_FROM) || 'no-reply@funsival.com',
   mailFromName: normalizeString(process.env.MAIL_FROM_NAME) || 'Funsival',
+  firebase: {
+    projectId: normalizeString(process.env.FIREBASE_PROJECT_ID),
+    clientEmail: normalizeString(process.env.FIREBASE_CLIENT_EMAIL),
+    privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n').trim(),
+  },
 };
