@@ -346,6 +346,47 @@ async function markConversationAsRead(currentUserId, conversationId) {
   return { success: true };
 }
 
+async function markMessageAsRead(currentUserId, conversationId, messageId) {
+  const firestore = getFirestore();
+  const userId = currentUserId.toString();
+  const conversationRef = firestore.collection(CONVERSATIONS_COLLECTION).doc(conversationId);
+  const conversationSnap = await conversationRef.get();
+  await ensureUserInConversation(currentUserId, conversationSnap);
+
+  const messageRef = conversationRef.collection(MESSAGES_SUBCOLLECTION).doc(messageId);
+  const messageSnap = await messageRef.get();
+
+  if (!messageSnap.exists) {
+    throw new ApiError(404, 'Message not found.');
+  }
+
+  const message = messageSnap.data();
+
+  if (message.senderId === userId) {
+    return serializeMessage(messageSnap.id, message);
+  }
+
+  const alreadyRead = (message.readBy || []).includes(userId);
+
+  if (!alreadyRead) {
+    await messageRef.update({
+      readBy: admin.firestore.FieldValue.arrayUnion(userId),
+    });
+
+    const conversation = conversationSnap.data();
+    const currentUnread = (conversation.unreadCount || {})[userId] || 0;
+    if (currentUnread > 0) {
+      await conversationRef.update({
+        [`unreadCount.${userId}`]: Math.max(0, currentUnread - 1),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+  }
+
+  const updatedSnap = await messageRef.get();
+  return serializeMessage(updatedSnap.id, updatedSnap.data());
+}
+
 async function editMessage(currentUserId, conversationId, messageId, { text }) {
   const firestore = getFirestore();
   const conversationRef = firestore.collection(CONVERSATIONS_COLLECTION).doc(conversationId);
@@ -454,6 +495,7 @@ module.exports = {
   getConversationById,
   listMessages,
   markConversationAsRead,
+  markMessageAsRead,
   editMessage,
   deleteMessage,
 };

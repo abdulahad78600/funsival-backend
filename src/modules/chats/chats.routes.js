@@ -24,5 +24,9 @@ router.delete(
   chatsController.deleteMessageHandler
 );
 router.patch('/conversations/:conversationId/read', chatsController.markReadHandler);
+router.patch(
+  '/conversations/:conversationId/messages/:messageId/read',
+  chatsController.markMessageReadHandler
+);
 
 module.exports = router;

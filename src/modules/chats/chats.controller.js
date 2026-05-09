@@ -14,6 +14,7 @@ const {
   getConversationById,
   listMessages,
   markConversationAsRead,
+  markMessageAsRead,
   editMessage,
   deleteMessage,
 } = require('./chats.service');
@@ -101,6 +102,18 @@ const markReadHandler = asyncHandler(async (req, res) => {
   });
 });
 
+const markMessageReadHandler = asyncHandler(async (req, res) => {
+  const conversationId = validateConversationId(req.params.conversationId);
+  const messageId = validateMessageId(req.params.messageId);
+  const message = await markMessageAsRead(req.user.id, conversationId, messageId);
+
+  res.status(200).json({
+    success: true,
+    message: 'Message marked as read.',
+    data: { message },
+  });
+});
+
 const editMessageHandler = asyncHandler(async (req, res) => {
   const conversationId = validateConversationId(req.params.conversationId);
   const messageId = validateMessageId(req.params.messageId);
@@ -134,6 +147,7 @@ module.exports = {
   sendMessageHandler,
   listMessagesHandler,
   markReadHandler,
+  markMessageReadHandler,
   editMessageHandler,
   deleteMessageHandler,
 };
