@@ -4,6 +4,7 @@ const { uploadFileToSpaces } = require('../../services/do-spaces.upload');
 const {
   saveUserPreferences,
   updateProviderProfile,
+  updateUserProfile,
   updateUserProfileImage,
 } = require('./users.service');
 
@@ -25,6 +26,16 @@ const updateProviderProfileHandler = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Provider profile updated successfully.',
+    data: { user },
+  });
+});
+
+const updateUserProfileHandler = asyncHandler(async (req, res) => {
+  const user = await updateUserProfile(req.user.id, req.body);
+
+  res.status(200).json({
+    success: true,
+    message: 'Profile updated successfully.',
     data: { user },
   });
 });
@@ -51,5 +62,6 @@ const uploadProfilePictureHandler = asyncHandler(async (req, res) => {
 module.exports = {
   savePreferencesHandler,
   updateProviderProfileHandler,
+  updateUserProfileHandler,
   uploadProfilePictureHandler,
 };

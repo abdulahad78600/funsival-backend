@@ -70,9 +70,20 @@ const getListingByIdHandler = asyncHandler(async (req, res) => {
 const browseListingsHandler = asyncHandler(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
-  const { hostId, category, type, city } = req.query;
+  const { hostId, category, type, city, search, minPrice, maxPrice, sort } = req.query;
 
-  const result = await browseListings({ page, limit, hostId, category, type, city });
+  const result = await browseListings({
+    page,
+    limit,
+    hostId,
+    category,
+    type,
+    city,
+    search,
+    minPrice,
+    maxPrice,
+    sort,
+  });
 
   res.status(200).json({
     success: true,

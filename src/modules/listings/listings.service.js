@@ -96,19 +96,82 @@ async function getListingForUser(listingId, userId) {
   return serializeListingRecord(listing.toJSON());
 }
 
-async function browseListings({ page = 1, limit = 10, hostId, category, type, city } = {}) {
+async function browseListings({
+  page = 1,
+  limit = 10,
+  hostId,
+  category,
+  type,
+  city,
+  search,
+  minPrice,
+  maxPrice,
+  sort,
+} = {}) {
   const skip = (page - 1) * limit;
   const filter = {};
 
   if (hostId) filter.createdBy = hostId;
-  if (category) filter.category = category;
+
+  if (category) {
+    const categories = String(category)
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (categories.length === 1) {
+      filter.category = new RegExp(`^${categories[0]}$`, 'i');
+    } else if (categories.length > 1) {
+      filter.category = { $in: categories.map((value) => new RegExp(`^${value}$`, 'i')) };
+    }
+  }
+
   if (type) filter.type = type;
-  if (city) filter['placeLocation.city'] = city;
+  if (city) filter['placeLocation.city'] = new RegExp(`^${city}$`, 'i');
+
+  if (search) {
+    const term = String(search).trim();
+    if (term) {
+      const regex = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.$or = [
+        { 'basicInformation.activityTitle': regex },
+        { 'basicInformation.description': regex },
+        { 'basicInformation.location': regex },
+        { category: regex },
+        { type: regex },
+      ];
+    }
+  }
+
+  const min = minPrice !== undefined && minPrice !== '' ? Number(minPrice) : null;
+  const max = maxPrice !== undefined && maxPrice !== '' ? Number(maxPrice) : null;
+  if ((min !== null && !Number.isNaN(min)) || (max !== null && !Number.isNaN(max))) {
+    const priceRange = {};
+    if (min !== null && !Number.isNaN(min)) priceRange.$gte = min;
+    if (max !== null && !Number.isNaN(max)) priceRange.$lte = max;
+    filter.$and = [
+      ...(filter.$and || []),
+      {
+        $or: [
+          { 'price.perPerson': priceRange },
+          { 'price.hourly': priceRange },
+          { 'price.daily': priceRange },
+        ],
+      },
+    ];
+  }
+
+  const sortMap = {
+    newest: { createdAt: -1 },
+    oldest: { createdAt: 1 },
+    'price-asc': { 'price.perPerson': 1, 'price.hourly': 1, 'price.daily': 1 },
+    'price-desc': { 'price.perPerson': -1, 'price.hourly': -1, 'price.daily': -1 },
+  };
+  const sortOption = sortMap[sort] || sortMap.newest;
 
   const [listings, total] = await Promise.all([
     Listing.find(filter)
-      .populate('createdBy', 'email role agencyName city')
-      .sort({ createdAt: -1 })
+      .populate('createdBy', 'email role agencyName city providerProfile')
+      .sort(sortOption)
       .skip(skip)
       .limit(limit),
     Listing.countDocuments(filter),

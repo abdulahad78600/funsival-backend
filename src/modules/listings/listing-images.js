@@ -71,13 +71,38 @@ function buildListingImagePublicUrl(photo) {
   return normalizedPhoto;
 }
 
-function serializeListingRecord(record = {}) {
+function serializeListingHost(createdBy) {
+  if (!createdBy || typeof createdBy !== 'object') return null;
+
+  const profile = createdBy.providerProfile || {};
+  const fullName = [profile.firstName, profile.lastName].filter(Boolean).join(' ').trim();
+  const name = fullName || createdBy.agencyName || createdBy.email || '';
+
   return {
+    id: (createdBy._id || createdBy.id || '').toString(),
+    name,
+    email: createdBy.email || '',
+    role: createdBy.role || '',
+    profileImage: profile.profileImage || '',
+    agencyName: createdBy.agencyName || '',
+    city: createdBy.city || profile.location?.city || '',
+  };
+}
+
+function serializeListingRecord(record = {}) {
+  const serialized = {
     ...record,
     photos: Array.isArray(record.photos)
       ? record.photos.map((photo) => buildListingImagePublicUrl(photo)).filter(Boolean)
       : [],
   };
+
+  if (record.createdBy && typeof record.createdBy === 'object') {
+    serialized.host = serializeListingHost(record.createdBy);
+    serialized.createdBy = serialized.host.id;
+  }
+
+  return serialized;
 }
 
 function buildStoredListingImagePath(fileName) {

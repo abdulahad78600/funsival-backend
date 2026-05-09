@@ -6,12 +6,19 @@ const { upload } = require('../../services/do-spaces.upload');
 const {
   savePreferencesHandler,
   updateProviderProfileHandler,
+  updateUserProfileHandler,
   uploadProfilePictureHandler,
 } = require('./users.controller');
 
 const router = express.Router();
 
 router.post('/preferences', authenticate, savePreferencesHandler);
+router.patch(
+  '/profile',
+  authenticate,
+  authorizeRoles(USER_ROLES.USER),
+  updateUserProfileHandler
+);
 router.patch(
   '/provider-profile',
   authenticate,

@@ -124,6 +124,47 @@ function validateProviderProfilePayload(payload = {}) {
   return validatedPayload;
 }
 
+function validateUserProfilePayload(payload = {}) {
+  const validatedPayload = {};
+
+  const email = validateOptionalEmail(payload.email, 'email');
+  const firstName = validateOptionalString(payload.firstName, 'firstName', { maxLength: 100 });
+  const lastName = validateOptionalString(payload.lastName, 'lastName', { maxLength: 100 });
+  const phoneNumber = validateOptionalString(payload.phoneNumber, 'phoneNumber', { maxLength: 30 });
+  const bio = validateOptionalString(payload.bio, 'bio', { maxLength: 1000 });
+  const profileImage = validateOptionalString(payload.profileImage, 'profileImage', {
+    maxLength: 1000,
+  });
+  const addressLine1 = validateOptionalString(payload.addressLine1, 'addressLine1', {
+    maxLength: 255,
+  });
+  const addressLine2 = validateOptionalString(payload.addressLine2, 'addressLine2', {
+    maxLength: 255,
+  });
+  const city = validateOptionalString(payload.city, 'city', { maxLength: 100 });
+  const state = validateOptionalString(payload.state, 'state', { maxLength: 100 });
+  const postalCode = validateOptionalString(payload.postalCode, 'postalCode', { maxLength: 30 });
+  const country = validateOptionalString(payload.country, 'country', { maxLength: 100 });
+  const dateOfBirth = validateOptionalDate(payload.dateOfBirth, 'dateOfBirth');
+
+  if (email !== undefined) validatedPayload.email = email;
+  if (firstName !== undefined) validatedPayload.firstName = firstName;
+  if (lastName !== undefined) validatedPayload.lastName = lastName;
+  if (phoneNumber !== undefined) validatedPayload.phoneNumber = phoneNumber;
+  if (dateOfBirth !== undefined) validatedPayload.dateOfBirth = dateOfBirth;
+  if (bio !== undefined) validatedPayload.bio = bio;
+  if (profileImage !== undefined) validatedPayload.profileImage = profileImage;
+  if (addressLine1 !== undefined) validatedPayload.addressLine1 = addressLine1;
+  if (addressLine2 !== undefined) validatedPayload.addressLine2 = addressLine2;
+  if (city !== undefined) validatedPayload.city = city;
+  if (state !== undefined) validatedPayload.state = state;
+  if (postalCode !== undefined) validatedPayload.postalCode = postalCode;
+  if (country !== undefined) validatedPayload.country = country;
+
+  return validatedPayload;
+}
+
 module.exports = {
   validateProviderProfilePayload,
+  validateUserProfilePayload,
 };
