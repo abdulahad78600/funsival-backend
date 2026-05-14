@@ -255,10 +255,18 @@ const listingSchema = new mongoose.Schema(
     toJSON: {
       transform: (doc, returnedObject) => {
         returnedObject.id = returnedObject._id.toString();
-        if (returnedObject.createdBy) {
-          returnedObject.createdBy = returnedObject.createdBy.toString();
-        } else {
+        const createdBy = returnedObject.createdBy;
+        if (!createdBy) {
           returnedObject.createdBy = null;
+        } else if (createdBy instanceof mongoose.Types.ObjectId) {
+          returnedObject.createdBy = createdBy.toString();
+        } else if (typeof createdBy === 'object' && createdBy._id) {
+          returnedObject.createdBy = {
+            ...createdBy,
+            id: createdBy._id.toString(),
+            _id: undefined,
+          };
+          delete returnedObject.createdBy._id;
         }
         delete returnedObject._id;
         return returnedObject;
