@@ -3,6 +3,8 @@ const User = require('../../models/user.model');
 const Listing = require('../../models/listing.model');
 const ApiError = require('../../utils/api-error');
 const { MESSAGE_TYPES } = require('./chats.validation');
+const { sendNotification } = require('../notifications/notifications.service');
+const { NOTIFICATION_TYPES } = require('../notifications/notifications.validation');
 
 const CONVERSATIONS_COLLECTION = 'conversations';
 const MESSAGES_SUBCOLLECTION = 'messages';
@@ -215,6 +217,24 @@ async function sendMessage(currentUserId, conversationId, payload) {
   });
 
   const messageSnap = await messageRef.get();
+
+  if (otherParticipantId) {
+    const senderInfo = (conversation.participantInfo || {})[senderId] || null;
+    const senderName = senderInfo ? senderInfo.name : 'New message';
+    const previewBody = lastMessagePreview.text || '';
+
+    sendNotification(otherParticipantId, {
+      type: NOTIFICATION_TYPES.CHAT_MESSAGE,
+      title: senderName,
+      body: previewBody,
+      data: {
+        conversationId,
+        messageId: messageSnap.id,
+        senderId,
+      },
+    }).catch((error) => console.error('Failed to send chat notification.', error));
+  }
+
   return serializeMessage(messageSnap.id, messageSnap.data());
 }
 
@@ -326,22 +346,26 @@ async function markConversationAsRead(currentUserId, conversationId) {
 
   const messagesQuery = await conversationRef
     .collection(MESSAGES_SUBCOLLECTION)
-    .where('senderId', '!=', userId)
-    .orderBy('senderId')
     .orderBy('createdAt', 'desc')
     .limit(100)
     .get();
 
   const batch = firestore.batch();
+  let pendingUpdates = 0;
   messagesQuery.docs.forEach((doc) => {
-    const readBy = doc.data().readBy || [];
-    if (!readBy.includes(userId)) {
-      batch.update(doc.ref, {
-        readBy: admin.firestore.FieldValue.arrayUnion(userId),
-      });
-    }
+    const data = doc.data();
+    if (data.senderId === userId) return;
+    const readBy = data.readBy || [];
+    if (readBy.includes(userId)) return;
+    batch.update(doc.ref, {
+      readBy: admin.firestore.FieldValue.arrayUnion(userId),
+    });
+    pendingUpdates += 1;
   });
-  await batch.commit();
+
+  if (pendingUpdates > 0) {
+    await batch.commit();
+  }
 
   return { success: true };
 }

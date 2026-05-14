@@ -40,6 +40,26 @@ const providerLocationSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const deviceTokenSchema = new mongoose.Schema(
+  {
+    token: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    platform: {
+      type: String,
+      enum: ['ios', 'android', 'web'],
+      default: 'web',
+    },
+    lastUsedAt: {
+      type: Date,
+      default: Date.now,
+    },
+  },
+  { _id: false }
+);
+
 const providerProfileSchema = new mongoose.Schema(
   {
     firstName: {
@@ -180,6 +200,11 @@ const userSchema = new mongoose.Schema(
       type: providerProfileSchema,
       default: undefined,
     },
+    deviceTokens: {
+      type: [deviceTokenSchema],
+      default: [],
+      select: false,
+    },
   },
   {
     timestamps: true,
@@ -198,6 +223,7 @@ const userSchema = new mongoose.Schema(
         delete returnedObject.emailVerificationExpiresAt;
         delete returnedObject.twoFactorCode;
         delete returnedObject.twoFactorExpiresAt;
+        delete returnedObject.deviceTokens;
         return returnedObject;
       },
     },

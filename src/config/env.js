@@ -31,6 +31,7 @@ module.exports = {
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
   apiBaseUrl: process.env.API_BASE_URL || `http://localhost:${port}`,
   frontendUrl: normalizeString(process.env.FRONTEND_URL) || 'http://localhost:3000',
+  notificationLinkBaseUrl: normalizeString(process.env.NOTIFICATION_LINK_BASE_URL),
   passwordResetBaseUrl:
     normalizeString(process.env.PASSWORD_RESET_BASE_URL) || 'https://testing.funsival.com',
   googleClientId: normalizeString(process.env.GOOGLE_CLIENT_ID),

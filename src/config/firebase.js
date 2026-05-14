@@ -32,9 +32,15 @@ function getAuth() {
   return admin.auth();
 }
 
+function getMessaging() {
+  initializeFirebase();
+  return admin.messaging();
+}
+
 module.exports = {
   admin,
   initializeFirebase,
   getFirestore,
   getAuth,
+  getMessaging,
 };

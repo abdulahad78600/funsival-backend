@@ -9,6 +9,8 @@ const {
   SERVICE_FEE_AMOUNT,
 } = require('../../constants/booking');
 const { buildNewBookingHostEmail } = require('./bookings.templates');
+const { sendNotification } = require('../notifications/notifications.service');
+const { NOTIFICATION_TYPES } = require('../notifications/notifications.validation');
 
 function timeStringToMinutes(time) {
   const [hours, minutes] = time.split(':').map(Number);
@@ -110,22 +112,45 @@ async function ensureSlotIsAvailable(payload) {
   throw new ApiError(409, 'This listing is already booked for the selected period.');
 }
 
+function describeGuest(guest) {
+  if (!guest) return 'A guest';
+  const profile = guest.providerProfile || {};
+  const fullName = [profile.firstName, profile.lastName].filter(Boolean).join(' ').trim();
+  return fullName || guest.agencyName || guest.email || 'A guest';
+}
+
 async function notifyHostOfNewBooking(booking, listing, host, guest) {
-  if (!host || !host.email) {
+  if (!host) {
     return;
   }
 
-  try {
-    const emailTemplate = buildNewBookingHostEmail({ booking, listing, guest });
-    await sendMail({
-      to: host.email,
-      subject: emailTemplate.subject,
-      html: emailTemplate.html,
-      text: emailTemplate.text,
-    });
-  } catch (error) {
-    console.error('Failed to send new booking notification email.', error);
+  if (host.email) {
+    try {
+      const emailTemplate = buildNewBookingHostEmail({ booking, listing, guest });
+      await sendMail({
+        to: host.email,
+        subject: emailTemplate.subject,
+        html: emailTemplate.html,
+        text: emailTemplate.text,
+      });
+    } catch (error) {
+      console.error('Failed to send new booking notification email.', error);
+    }
   }
+
+  const guestName = describeGuest(guest);
+  const listingTitle = (listing && listing.title) || 'your listing';
+
+  sendNotification(host._id, {
+    type: NOTIFICATION_TYPES.BOOKING_NEW,
+    title: 'New booking received',
+    body: `${guestName} booked ${listingTitle}.`,
+    data: {
+      bookingId: booking._id ? booking._id.toString() : '',
+      listingId: listing && listing._id ? listing._id.toString() : '',
+      guestId: guest && guest._id ? guest._id.toString() : '',
+    },
+  }).catch((error) => console.error('Failed to send booking push notification.', error));
 }
 
 async function createBooking(payload, userId) {
@@ -259,6 +284,24 @@ async function cancelBooking(bookingId, userId) {
   booking.cancelledAt = new Date();
   booking.cancelledBy = userId;
   await booking.save();
+
+  const otherPartyId = isGuest ? booking.host : booking.bookedBy;
+  if (otherPartyId) {
+    sendNotification(otherPartyId, {
+      type: NOTIFICATION_TYPES.BOOKING_CANCELLED,
+      title: 'Booking cancelled',
+      body: isGuest
+        ? 'A guest cancelled their booking.'
+        : 'The host cancelled your booking.',
+      data: {
+        bookingId: booking._id.toString(),
+        listingId: booking.listing ? booking.listing.toString() : '',
+        cancelledBy: userId.toString(),
+      },
+    }).catch((error) =>
+      console.error('Failed to send booking cancellation notification.', error)
+    );
+  }
 
   return booking.toJSON();
 }
