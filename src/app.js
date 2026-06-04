@@ -7,6 +7,10 @@ const { nodeEnv, frontendUrl } = require('./config/env');
 const apiRoutes = require('./routes');
 const errorHandler = require('./middlewares/error.middleware');
 const notFoundHandler = require('./middlewares/not-found.middleware');
+const {
+  platformWebhookHandler,
+  connectWebhookHandler,
+} = require('./modules/payments/payments.webhooks');
 
 const app = express();
 
@@ -71,6 +75,20 @@ const corsOptions = {
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+
+// Stripe webhooks need the raw request body for signature verification,
+// so they must be mounted BEFORE express.json().
+app.post(
+  '/api/v1/webhooks/stripe',
+  express.raw({ type: 'application/json' }),
+  platformWebhookHandler
+);
+app.post(
+  '/api/v1/webhooks/stripe/connect',
+  express.raw({ type: 'application/json' }),
+  connectWebhookHandler
+);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

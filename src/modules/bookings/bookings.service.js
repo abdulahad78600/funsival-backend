@@ -6,8 +6,10 @@ const { sendMail } = require('../../services/mail.service');
 const {
   BOOKING_TYPES,
   BOOKING_STATUS,
+  PAYMENT_STATUS,
   SERVICE_FEE_AMOUNT,
 } = require('../../constants/booking');
+const paymentsService = require('../payments/payments.service');
 const { buildNewBookingHostEmail } = require('./bookings.templates');
 const { sendNotification } = require('../notifications/notifications.service');
 const { NOTIFICATION_TYPES } = require('../notifications/notifications.validation');
@@ -164,6 +166,20 @@ async function createBooking(payload, userId) {
     throw new ApiError(400, 'You cannot book your own listing.');
   }
 
+  const host = await User.findById(listing.createdBy).select('+stripeConnect email role agencyName');
+  if (!host || !host.stripeConnect || !host.stripeConnect.accountId) {
+    throw new ApiError(
+      400,
+      'This provider has not connected a payment account yet. Booking is unavailable.'
+    );
+  }
+  if (!host.stripeConnect.chargesEnabled) {
+    throw new ApiError(
+      400,
+      'This provider has not finished payment onboarding. Booking is unavailable.'
+    );
+  }
+
   await ensureSlotIsAvailable(payload);
 
   const pricing = calculateBookingPricing(payload, listing);
@@ -184,17 +200,29 @@ async function createBooking(payload, userId) {
     serviceFee: pricing.serviceFee,
     totalAmount: pricing.totalAmount,
     currency: pricing.currency,
-    status: BOOKING_STATUS.CONFIRMED,
+    status: BOOKING_STATUS.PENDING,
+    paymentStatus: PAYMENT_STATUS.REQUIRES_PAYMENT,
+    stripeAccountId: host.stripeConnect.accountId,
   });
 
-  const [host, guest] = await Promise.all([
-    User.findById(listing.createdBy),
-    User.findById(userId),
+  const guest = await User.findById(userId);
+  const checkout = await paymentsService.createCheckoutSession(booking._id, guest);
+
+  return {
+    booking: booking.toJSON(),
+    checkout,
+  };
+}
+
+async function notifyHostAfterPayment(bookingId) {
+  const booking = await Booking.findById(bookingId);
+  if (!booking) return;
+  const [listing, host, guest] = await Promise.all([
+    Listing.findById(booking.listing),
+    User.findById(booking.host),
+    User.findById(booking.bookedBy),
   ]);
-
   await notifyHostOfNewBooking(booking, listing, host, guest);
-
-  return booking.toJSON();
 }
 
 async function getBookingsForGuest(userId, { page = 1, limit = 10 } = {}) {
@@ -324,4 +352,5 @@ module.exports = {
   getBookingsForHost,
   getBookingByIdForUser,
   cancelBooking,
+  notifyHostAfterPayment,
 };

@@ -19,12 +19,12 @@ function parsePaginationQuery(query) {
 
 const createBookingHandler = asyncHandler(async (req, res) => {
   const payload = validateCreateBookingPayload(req.body);
-  const booking = await createBooking(payload, req.user.id);
+  const result = await createBooking(payload, req.user.id);
 
   res.status(201).json({
     success: true,
-    message: 'Booking created successfully.',
-    data: { booking },
+    message: 'Booking created. Complete payment via the returned checkout URL.',
+    data: result,
   });
 });
 

@@ -13,12 +13,24 @@ const BOOKING_STATUS = {
 };
 
 const PAYMENT_STATUS = {
-  PENDING: 'pending',
-  PAID: 'paid',
+  REQUIRES_PAYMENT: 'requires_payment',
+  PROCESSING: 'processing',
+  HELD: 'held',
+  RELEASED: 'released',
   REFUNDED: 'refunded',
+  FAILED: 'failed',
+  DISPUTED: 'disputed',
 };
 
 const SERVICE_FEE_AMOUNT = 8;
+
+const REFUND_REQUEST_STATUS = {
+  PENDING: 'pending',
+  APPROVED: 'approved',
+  REJECTED: 'rejected',
+  EXPIRED: 'expired',
+  WITHDRAWN: 'withdrawn',
+};
 
 module.exports = {
   BOOKING_TYPES,
@@ -27,5 +39,7 @@ module.exports = {
   AVAILABLE_BOOKING_TYPES: Object.values(BOOKING_TYPES),
   AVAILABLE_BOOKING_STATUSES: Object.values(BOOKING_STATUS),
   AVAILABLE_PAYMENT_STATUSES: Object.values(PAYMENT_STATUS),
+  REFUND_REQUEST_STATUS,
+  AVAILABLE_REFUND_REQUEST_STATUSES: Object.values(REFUND_REQUEST_STATUS),
   SERVICE_FEE_AMOUNT,
 };

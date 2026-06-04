@@ -60,6 +60,37 @@ const deviceTokenSchema = new mongoose.Schema(
   { _id: false }
 );
 
+const stripeConnectSchema = new mongoose.Schema(
+  {
+    accountId: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    chargesEnabled: {
+      type: Boolean,
+      default: false,
+    },
+    payoutsEnabled: {
+      type: Boolean,
+      default: false,
+    },
+    detailsSubmitted: {
+      type: Boolean,
+      default: false,
+    },
+    onboardedAt: {
+      type: Date,
+      default: null,
+    },
+    disabledReason: {
+      type: String,
+      default: null,
+    },
+  },
+  { _id: false }
+);
+
 const providerProfileSchema = new mongoose.Schema(
   {
     firstName: {
@@ -203,6 +234,11 @@ const userSchema = new mongoose.Schema(
     deviceTokens: {
       type: [deviceTokenSchema],
       default: [],
+      select: false,
+    },
+    stripeConnect: {
+      type: stripeConnectSchema,
+      default: () => ({}),
       select: false,
     },
   },

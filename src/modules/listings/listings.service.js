@@ -1,4 +1,5 @@
 const Listing = require('../../models/listing.model');
+const User = require('../../models/user.model');
 const ApiError = require('../../utils/api-error');
 const { validateListingPayload } = require('./listings.validation');
 const {
@@ -53,7 +54,28 @@ async function cleanupUnusedListingPhotos(photos = []) {
   }
 }
 
+async function ensureHostStripeConnected(userId) {
+  const user = await User.findById(userId).select('+stripeConnect');
+  if (!user) {
+    throw new ApiError(404, 'User not found.');
+  }
+  if (!user.stripeConnect || !user.stripeConnect.accountId) {
+    throw new ApiError(
+      403,
+      'Connect your Stripe account before creating a listing.'
+    );
+  }
+  if (!user.stripeConnect.chargesEnabled) {
+    throw new ApiError(
+      403,
+      'Complete your Stripe onboarding before creating a listing.'
+    );
+  }
+}
+
 async function createListing(payload, userId) {
+  await ensureHostStripeConnected(userId);
+
   const validatedPayload = validateListingPayload(payload);
 
   const listing = await Listing.create({

@@ -5,6 +5,9 @@ const NOTIFICATION_TYPES = Object.freeze({
   BOOKING_NEW: 'booking_new',
   BOOKING_CANCELLED: 'booking_cancelled',
   BOOKING_STATUS_CHANGED: 'booking_status_changed',
+  REFUND_REQUESTED: 'refund_requested',
+  REFUND_APPROVED: 'refund_approved',
+  REFUND_REJECTED: 'refund_rejected',
 });
 
 const AVAILABLE_NOTIFICATION_TYPES = Object.values(NOTIFICATION_TYPES);

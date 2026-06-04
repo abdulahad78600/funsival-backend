@@ -40,6 +40,13 @@ function buildWebpushLink(type, data = {}) {
     case NOTIFICATION_TYPES.BOOKING_CANCELLED:
     case NOTIFICATION_TYPES.BOOKING_STATUS_CHANGED:
       return data.bookingId ? `${base}/bookings/${data.bookingId}` : `${base}/bookings`;
+    case NOTIFICATION_TYPES.REFUND_REQUESTED:
+      return data.refundRequestId
+        ? `${base}/admin/refund-requests/${data.refundRequestId}`
+        : `${base}/admin/refund-requests`;
+    case NOTIFICATION_TYPES.REFUND_APPROVED:
+    case NOTIFICATION_TYPES.REFUND_REJECTED:
+      return data.bookingId ? `${base}/bookings/${data.bookingId}` : `${base}/bookings`;
     default:
       return base || undefined;
   }

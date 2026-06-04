@@ -49,4 +49,25 @@ module.exports = {
     clientEmail: normalizeString(process.env.FIREBASE_CLIENT_EMAIL),
     privateKey: (process.env.FIREBASE_PRIVATE_KEY || '').replace(/\\n/g, '\n').trim(),
   },
+  stripe: {
+    secretKey: normalizeSecret(process.env.STRIPE_SECRET_KEY),
+    publishableKey: normalizeString(process.env.STRIPE_PUBLISHABLE_KEY),
+    webhookSecret: normalizeSecret(process.env.STRIPE_WEBHOOK_SECRET),
+    connectWebhookSecret: normalizeSecret(process.env.STRIPE_CONNECT_WEBHOOK_SECRET),
+    applicationFeePercent: Number(process.env.STRIPE_APPLICATION_FEE_PERCENT) || 10,
+    payoutDelayDays: Number(process.env.STRIPE_PAYOUT_DELAY_DAYS) || 7,
+    connectCountry: normalizeString(process.env.STRIPE_CONNECT_COUNTRY) || 'US',
+    checkoutSuccessUrl:
+      normalizeString(process.env.STRIPE_CHECKOUT_SUCCESS_URL) ||
+      'https://testing.funsival.com/bookings/{BOOKING_ID}?status=success',
+    checkoutCancelUrl:
+      normalizeString(process.env.STRIPE_CHECKOUT_CANCEL_URL) ||
+      'https://testing.funsival.com/bookings/{BOOKING_ID}?status=cancelled',
+    onboardingReturnUrl:
+      normalizeString(process.env.STRIPE_ONBOARDING_RETURN_URL) ||
+      'https://testing.funsival.com/payments/onboarding/complete',
+    onboardingRefreshUrl:
+      normalizeString(process.env.STRIPE_ONBOARDING_REFRESH_URL) ||
+      'https://testing.funsival.com/payments/onboarding/refresh',
+  },
 };

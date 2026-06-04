@@ -94,7 +94,7 @@ const bookingSchema = new mongoose.Schema(
     paymentStatus: {
       type: String,
       enum: AVAILABLE_PAYMENT_STATUSES,
-      default: PAYMENT_STATUS.PENDING,
+      default: PAYMENT_STATUS.REQUIRES_PAYMENT,
     },
     cancelledAt: {
       type: Date,
@@ -103,6 +103,62 @@ const bookingSchema = new mongoose.Schema(
     cancelledBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
+      default: null,
+    },
+    stripeAccountId: {
+      type: String,
+      default: null,
+    },
+    stripeCheckoutSessionId: {
+      type: String,
+      default: null,
+    },
+    stripePaymentIntentId: {
+      type: String,
+      default: null,
+      index: true,
+    },
+    stripeChargeId: {
+      type: String,
+      default: null,
+    },
+    stripeRefundId: {
+      type: String,
+      default: null,
+    },
+    stripeDisputeId: {
+      type: String,
+      default: null,
+    },
+    applicationFeeAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    paidAt: {
+      type: Date,
+      default: null,
+    },
+    payoutEligibleAt: {
+      type: Date,
+      default: null,
+    },
+    refundedAt: {
+      type: Date,
+      default: null,
+    },
+    refundedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    refundReason: {
+      type: String,
+      default: null,
+    },
+    activeRefundRequest: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'RefundRequest',
       default: null,
     },
   },
