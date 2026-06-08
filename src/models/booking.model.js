@@ -62,7 +62,7 @@ const bookingSchema = new mongoose.Schema(
     unitsBooked: {
       type: Number,
       required: true,
-      min: 1,
+      min: 0.01,
     },
     subtotal: {
       type: Number,
@@ -103,6 +103,36 @@ const bookingSchema = new mongoose.Schema(
     cancelledBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
+      default: null,
+    },
+    authorizedAt: {
+      type: Date,
+      default: null,
+    },
+    authExpiresAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    requestReminderSentAt: {
+      type: Date,
+      default: null,
+    },
+    acceptedAt: {
+      type: Date,
+      default: null,
+    },
+    declinedAt: {
+      type: Date,
+      default: null,
+    },
+    declinedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+    },
+    declineReason: {
+      type: String,
       default: null,
     },
     stripeAccountId: {

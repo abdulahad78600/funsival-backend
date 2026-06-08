@@ -3,7 +3,13 @@ const ApiError = require('../../utils/api-error');
 const NOTIFICATION_TYPES = Object.freeze({
   CHAT_MESSAGE: 'chat_message',
   BOOKING_NEW: 'booking_new',
+  BOOKING_REQUEST: 'booking_request',
+  BOOKING_REQUEST_SENT: 'booking_request_sent',
+  BOOKING_REQUEST_REMINDER: 'booking_request_reminder',
+  BOOKING_ACCEPTED: 'booking_accepted',
+  BOOKING_DECLINED: 'booking_declined',
   BOOKING_CANCELLED: 'booking_cancelled',
+  BOOKING_PAYOUT_RELEASED: 'booking_payout_released',
   BOOKING_STATUS_CHANGED: 'booking_status_changed',
   REFUND_REQUESTED: 'refund_requested',
   REFUND_APPROVED: 'refund_approved',

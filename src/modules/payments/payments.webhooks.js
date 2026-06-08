@@ -8,23 +8,35 @@ function constructEvent(rawBody, signature, secret) {
 
 async function dispatchEvent(event) {
   switch (event.type) {
-    case 'payment_intent.succeeded':
+    case 'payment_intent.amount_capturable_updated': {
+      await paymentsService.handlePaymentIntentAuthorized(event.data.object);
+      return;
+    }
+    case 'payment_intent.canceled': {
+      await paymentsService.handlePaymentIntentCanceled(event.data.object);
+      return;
+    }
+    case 'payment_intent.succeeded': {
+      await paymentsService.handlePaymentIntentSucceeded(event.data.object);
+      return;
+    }
     case 'checkout.session.completed': {
       const obj = event.data.object;
-      if (event.type === 'checkout.session.completed') {
-        if (obj.payment_status !== 'paid') return;
-        const paymentIntentId =
-          typeof obj.payment_intent === 'string' ? obj.payment_intent : obj.payment_intent && obj.payment_intent.id;
-        if (!paymentIntentId) return;
-        const stripeAccount = event.account;
-        const paymentIntent = await stripe.paymentIntents.retrieve(
-          paymentIntentId,
-          stripeAccount ? { stripeAccount } : undefined
-        );
+      const paymentIntentId =
+        typeof obj.payment_intent === 'string'
+          ? obj.payment_intent
+          : obj.payment_intent && obj.payment_intent.id;
+      if (!paymentIntentId) return;
+      const stripeAccount = event.account;
+      const paymentIntent = await stripe.paymentIntents.retrieve(
+        paymentIntentId,
+        stripeAccount ? { stripeAccount } : undefined
+      );
+      if (paymentIntent.status === 'requires_capture') {
+        await paymentsService.handlePaymentIntentAuthorized(paymentIntent);
+      } else if (paymentIntent.status === 'succeeded') {
         await paymentsService.handlePaymentIntentSucceeded(paymentIntent);
-        return;
       }
-      await paymentsService.handlePaymentIntentSucceeded(obj);
       return;
     }
     case 'charge.refunded':

@@ -4,7 +4,11 @@ const User = require('../../models/user.model');
 const Booking = require('../../models/booking.model');
 const Listing = require('../../models/listing.model');
 const ApiError = require('../../utils/api-error');
-const { BOOKING_STATUS, PAYMENT_STATUS } = require('../../constants/booking');
+const {
+  BOOKING_STATUS,
+  PAYMENT_STATUS,
+  HOST_APPROVAL_WINDOW_DAYS,
+} = require('../../constants/booking');
 const { sendNotification } = require('../notifications/notifications.service');
 const { NOTIFICATION_TYPES } = require('../notifications/notifications.validation');
 
@@ -223,6 +227,7 @@ async function createCheckoutSession(bookingId, guestUser) {
         },
       ],
       payment_intent_data: {
+        capture_method: 'manual',
         application_fee_amount: applicationFeeAmount,
         metadata: {
           bookingId: String(booking._id),
@@ -274,28 +279,160 @@ async function markBookingPaid(booking, paymentIntent) {
         : paymentIntent.latest_charge.id;
   }
   booking.paidAt = new Date();
+  booking.acceptedAt = booking.acceptedAt || new Date();
   booking.payoutEligibleAt = payoutEligibleAt;
   await booking.save();
 
-  // Lazy require to avoid circular dependency with bookings.service.
-  // Send the full new-booking host notification (email + push) only after payment lands.
-  try {
-    const bookingsService = require('../bookings/bookings.service');
-    await bookingsService.notifyHostAfterPayment(booking._id);
-  } catch (error) {
-    console.error('Failed to send post-payment host notification.', error);
-    sendNotification(booking.host, {
-      type: NOTIFICATION_TYPES.BOOKING_NEW,
-      title: 'Payment received',
-      body: 'A guest has paid for their booking. Funds will be released after the hold period.',
-      data: {
-        bookingId: booking._id.toString(),
-        listingId: booking.listing ? booking.listing.toString() : '',
-      },
-    }).catch((err) => console.error('Failed to send payment-received notification.', err));
-  }
+  sendNotification(booking.bookedBy, {
+    type: NOTIFICATION_TYPES.BOOKING_ACCEPTED,
+    title: 'Booking confirmed',
+    body: 'The host accepted your booking and your card has been charged.',
+    data: {
+      bookingId: booking._id.toString(),
+      listingId: booking.listing ? booking.listing.toString() : '',
+    },
+  }).catch((error) => console.error('Failed to notify guest of booking acceptance.', error));
+
+  sendNotification(booking.host, {
+    type: NOTIFICATION_TYPES.BOOKING_ACCEPTED,
+    title: 'Booking accepted',
+    body: `Payment of ${booking.currency} ${booking.totalAmount} captured. Funds will be paid out after the ${env.stripe.payoutDelayDays}-day hold.`,
+    data: {
+      bookingId: booking._id.toString(),
+      listingId: booking.listing ? booking.listing.toString() : '',
+      payoutEligibleAt: booking.payoutEligibleAt
+        ? booking.payoutEligibleAt.toISOString()
+        : null,
+    },
+  }).catch((error) => console.error('Failed to notify host of capture success.', error));
 
   return booking;
+}
+
+async function markBookingAuthorized(booking, paymentIntent) {
+  if (booking.paymentStatus === PAYMENT_STATUS.AUTHORIZED) {
+    return booking;
+  }
+  if (
+    booking.paymentStatus === PAYMENT_STATUS.HELD ||
+    booking.paymentStatus === PAYMENT_STATUS.RELEASED ||
+    booking.paymentStatus === PAYMENT_STATUS.REFUNDED
+  ) {
+    return booking;
+  }
+
+  const authExpiresAt = new Date();
+  authExpiresAt.setUTCDate(authExpiresAt.getUTCDate() + HOST_APPROVAL_WINDOW_DAYS);
+
+  booking.paymentStatus = PAYMENT_STATUS.AUTHORIZED;
+  booking.status = BOOKING_STATUS.AWAITING_HOST_APPROVAL;
+  booking.stripePaymentIntentId = paymentIntent.id;
+  if (paymentIntent.latest_charge) {
+    booking.stripeChargeId =
+      typeof paymentIntent.latest_charge === 'string'
+        ? paymentIntent.latest_charge
+        : paymentIntent.latest_charge.id;
+  }
+  booking.authorizedAt = new Date();
+  booking.authExpiresAt = authExpiresAt;
+  await booking.save();
+
+  try {
+    const bookingsService = require('../bookings/bookings.service');
+    await bookingsService.notifyHostOfBookingRequest(booking._id);
+  } catch (error) {
+    console.error('Failed to send booking-request host notification.', error);
+  }
+
+  sendNotification(booking.bookedBy, {
+    type: NOTIFICATION_TYPES.BOOKING_REQUEST_SENT,
+    title: 'Booking request sent',
+    body: 'Your card has been authorized. Waiting for the host to accept — no charge yet.',
+    data: {
+      bookingId: booking._id.toString(),
+      listingId: booking.listing ? booking.listing.toString() : '',
+      authExpiresAt: booking.authExpiresAt ? booking.authExpiresAt.toISOString() : null,
+    },
+  }).catch((error) => console.error('Failed to notify guest of request sent.', error));
+
+  return booking;
+}
+
+async function capturePaymentForBooking(bookingId, hostUserId) {
+  const booking = await Booking.findById(bookingId);
+  if (!booking) {
+    throw new ApiError(404, 'Booking not found.');
+  }
+  if (booking.host.toString() !== hostUserId.toString()) {
+    throw new ApiError(403, 'You are not allowed to accept this booking.');
+  }
+  if (booking.paymentStatus !== PAYMENT_STATUS.AUTHORIZED) {
+    throw new ApiError(
+      400,
+      `Only authorized bookings can be captured. Current state: ${booking.paymentStatus}.`
+    );
+  }
+  if (!booking.stripePaymentIntentId || !booking.stripeAccountId) {
+    throw new ApiError(400, 'Booking is missing Stripe payment information.');
+  }
+  if (booking.authExpiresAt && booking.authExpiresAt.getTime() <= Date.now()) {
+    throw new ApiError(
+      400,
+      'The authorization window has expired. The guest needs to book again.'
+    );
+  }
+
+  const paymentIntent = await stripe.paymentIntents.capture(
+    booking.stripePaymentIntentId,
+    {},
+    { stripeAccount: booking.stripeAccountId }
+  );
+
+  await markBookingPaid(booking, paymentIntent);
+  return booking;
+}
+
+async function cancelAuthorizationForBooking(bookingId, actorUserId, reason) {
+  const booking = await Booking.findById(bookingId);
+  if (!booking) {
+    throw new ApiError(404, 'Booking not found.');
+  }
+
+  const isHost = booking.host.toString() === actorUserId.toString();
+  const isGuest = booking.bookedBy.toString() === actorUserId.toString();
+  if (!isHost && !isGuest) {
+    throw new ApiError(403, 'You are not allowed to cancel this booking.');
+  }
+
+  if (booking.paymentStatus !== PAYMENT_STATUS.AUTHORIZED) {
+    throw new ApiError(
+      400,
+      `Only authorized bookings can be released. Current state: ${booking.paymentStatus}.`
+    );
+  }
+  if (!booking.stripePaymentIntentId || !booking.stripeAccountId) {
+    throw new ApiError(400, 'Booking is missing Stripe payment information.');
+  }
+
+  await stripe.paymentIntents.cancel(
+    booking.stripePaymentIntentId,
+    { cancellation_reason: 'requested_by_customer' },
+    { stripeAccount: booking.stripeAccountId }
+  );
+
+  booking.paymentStatus = PAYMENT_STATUS.AUTH_RELEASED;
+  booking.status = isHost ? BOOKING_STATUS.DECLINED : BOOKING_STATUS.CANCELLED;
+  if (isHost) {
+    booking.declinedAt = new Date();
+    booking.declinedBy = actorUserId;
+    booking.declineReason = reason || null;
+  } else {
+    booking.cancelledAt = new Date();
+    booking.cancelledBy = actorUserId;
+  }
+  await booking.save();
+
+  return { booking, isHost };
 }
 
 async function executeStripeRefund(booking, adminUserId, reason) {
@@ -403,6 +540,48 @@ async function handlePaymentIntentSucceeded(paymentIntent) {
   await markBookingPaid(booking, paymentIntent);
 }
 
+async function handlePaymentIntentAuthorized(paymentIntent) {
+  const bookingId =
+    paymentIntent.metadata && paymentIntent.metadata.bookingId
+      ? paymentIntent.metadata.bookingId
+      : null;
+  if (!bookingId) return;
+
+  const booking = await Booking.findById(bookingId);
+  if (!booking) return;
+
+  await markBookingAuthorized(booking, paymentIntent);
+}
+
+async function handlePaymentIntentCanceled(paymentIntent) {
+  const bookingId =
+    paymentIntent.metadata && paymentIntent.metadata.bookingId
+      ? paymentIntent.metadata.bookingId
+      : null;
+  if (!bookingId) return;
+
+  const booking = await Booking.findById(bookingId);
+  if (!booking) return;
+
+  if (
+    booking.paymentStatus === PAYMENT_STATUS.AUTH_RELEASED ||
+    booking.paymentStatus === PAYMENT_STATUS.REFUNDED ||
+    booking.paymentStatus === PAYMENT_STATUS.HELD
+  ) {
+    return;
+  }
+
+  booking.paymentStatus = PAYMENT_STATUS.AUTH_RELEASED;
+  if (
+    booking.status !== BOOKING_STATUS.DECLINED &&
+    booking.status !== BOOKING_STATUS.CANCELLED
+  ) {
+    booking.status = BOOKING_STATUS.CANCELLED;
+    booking.cancelledAt = booking.cancelledAt || new Date();
+  }
+  await booking.save();
+}
+
 async function handleChargeRefunded(charge) {
   if (!charge || !charge.payment_intent) return;
   const booking = await Booking.findOne({ stripePaymentIntentId: charge.payment_intent });
@@ -429,14 +608,31 @@ async function handlePayoutPaid(payout) {
   // When a payout actually leaves Stripe and lands in the provider's bank,
   // mark any held bookings whose hold window has elapsed as released.
   const now = new Date();
-  await Booking.updateMany(
-    {
-      paymentStatus: PAYMENT_STATUS.HELD,
-      payoutEligibleAt: { $lte: now },
-      stripeAccountId: payout.destination ? String(payout.destination) : { $exists: true },
-    },
-    { $set: { paymentStatus: PAYMENT_STATUS.RELEASED } }
+  const filter = {
+    paymentStatus: PAYMENT_STATUS.HELD,
+    payoutEligibleAt: { $lte: now },
+    stripeAccountId: payout.destination ? String(payout.destination) : { $exists: true },
+  };
+
+  const releasedBookings = await Booking.find(filter).select(
+    '_id host listing currency totalAmount'
   );
+
+  if (releasedBookings.length === 0) return;
+
+  await Booking.updateMany(filter, { $set: { paymentStatus: PAYMENT_STATUS.RELEASED } });
+
+  for (const booking of releasedBookings) {
+    sendNotification(booking.host, {
+      type: NOTIFICATION_TYPES.BOOKING_PAYOUT_RELEASED,
+      title: 'Payout released',
+      body: `Your payout of ${booking.currency} ${booking.totalAmount} is on its way to your bank.`,
+      data: {
+        bookingId: booking._id.toString(),
+        listingId: booking.listing ? booking.listing.toString() : '',
+      },
+    }).catch((error) => console.error('Failed to notify host of payout release.', error));
+  }
 }
 
 module.exports = {
@@ -444,10 +640,14 @@ module.exports = {
   getConnectAccountStatus,
   createLoginLink,
   createCheckoutSession,
+  capturePaymentForBooking,
+  cancelAuthorizationForBooking,
   refundBooking,
   executeStripeRefund,
   syncConnectedAccountFromEvent,
   handlePaymentIntentSucceeded,
+  handlePaymentIntentAuthorized,
+  handlePaymentIntentCanceled,
   handleChargeRefunded,
   handleChargeDispute,
   handlePayoutPaid,

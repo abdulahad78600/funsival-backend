@@ -9,6 +9,10 @@ const {
   PAYMENT_STATUS,
   SERVICE_FEE_AMOUNT,
 } = require('../../constants/booking');
+const {
+  LISTING_CATEGORIES,
+  normalizeCategory,
+} = require('../../constants/listing');
 const paymentsService = require('../payments/payments.service');
 const { buildNewBookingHostEmail } = require('./bookings.templates');
 const { sendNotification } = require('../notifications/notifications.service');
@@ -33,11 +37,125 @@ function calculateDaysBetween(startDate, endDate) {
   return Math.max(days, 1);
 }
 
-function calculateBookingPricing(payload, listing) {
+function resolveBookingType(payload, listing) {
+  const category = normalizeCategory(listing && listing.category);
+  if (category === LISTING_CATEGORIES.ACTIVITY) {
+    return BOOKING_TYPES.PER_PERSON;
+  }
+  if (
+    category === LISTING_CATEGORIES.PLACE ||
+    category === LISTING_CATEGORIES.EQUIPMENT
+  ) {
+    const mode = String(payload.pricingMode || '').trim().toLowerCase();
+    if (mode === 'daily') return BOOKING_TYPES.DAILY;
+    if (mode === 'hourly' || mode === '') return BOOKING_TYPES.HOURLY;
+  }
+  return null;
+}
+
+function addHoursToTime(timeString, hoursToAdd) {
+  const [h, m] = timeString.split(':').map(Number);
+  const totalMinutes = h * 60 + m + Math.round(hoursToAdd * 60);
+  if (totalMinutes >= 24 * 60) {
+    throw new ApiError(
+      400,
+      'Booking would extend to or past midnight. Use the daily pricing mode for multi-day bookings.'
+    );
+  }
+  const endH = Math.floor(totalMinutes / 60);
+  const endM = totalMinutes % 60;
+  return `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
+}
+
+function addDaysToDate(date, daysToAdd) {
+  const result = new Date(date);
+  result.setUTCDate(result.getUTCDate() + daysToAdd);
+  return result;
+}
+
+function expandBookingTimes(payload, bookingType) {
+  const expanded = { ...payload };
+
+  if (
+    bookingType === BOOKING_TYPES.HOURLY ||
+    bookingType === BOOKING_TYPES.PER_HOUR
+  ) {
+    if (!expanded.endDate) {
+      expanded.endDate = expanded.startDate;
+    }
+    if (expanded.startTime && expanded.durationHours && !expanded.endTime) {
+      expanded.endTime = addHoursToTime(expanded.startTime, expanded.durationHours);
+    }
+  } else if (bookingType === BOOKING_TYPES.DAILY) {
+    if (expanded.durationDays && !expanded.endDate) {
+      expanded.endDate = addDaysToDate(expanded.startDate, expanded.durationDays - 1);
+    }
+    expanded.startTime = null;
+    expanded.endTime = null;
+  } else if (bookingType === BOOKING_TYPES.PER_PERSON) {
+    if (!expanded.endDate) {
+      expanded.endDate = expanded.startDate;
+    }
+  }
+
+  return expanded;
+}
+
+function validateBookingInputsForType(payload, listing, bookingType) {
+  const errors = {};
+
+  if (bookingType === BOOKING_TYPES.PER_PERSON) {
+    if (
+      payload.numberOfGuests === undefined ||
+      payload.numberOfGuests === null
+    ) {
+      errors.numberOfGuests = 'Number of guests is required for activities.';
+    } else if (
+      !Number.isInteger(payload.numberOfGuests) ||
+      payload.numberOfGuests < 1
+    ) {
+      errors.numberOfGuests = 'Number of guests must be a positive integer.';
+    } else if (
+      listing.serviceDetails &&
+      listing.serviceDetails.maxParticipants &&
+      payload.numberOfGuests > listing.serviceDetails.maxParticipants
+    ) {
+      errors.numberOfGuests = `This activity allows at most ${listing.serviceDetails.maxParticipants} participants.`;
+    }
+    if (!payload.startTime) errors.startTime = 'Start time is required for activities.';
+    if (!payload.endTime) errors.endTime = 'End time is required for activities.';
+  } else if (
+    bookingType === BOOKING_TYPES.HOURLY ||
+    bookingType === BOOKING_TYPES.PER_HOUR
+  ) {
+    if (!payload.startTime) {
+      errors.startTime = 'Start time is required for hourly bookings.';
+    }
+    const hasDuration =
+      payload.durationHours !== undefined && payload.durationHours !== null;
+    if (!hasDuration && !payload.endTime) {
+      errors.durationHours =
+        'durationHours is required (or provide endTime explicitly).';
+    }
+  } else if (bookingType === BOOKING_TYPES.DAILY) {
+    const hasDurationDays =
+      payload.durationDays !== undefined && payload.durationDays !== null;
+    if (!hasDurationDays && !payload.endDate) {
+      errors.durationDays =
+        'durationDays is required (or provide endDate explicitly).';
+    }
+  }
+
+  if (Object.keys(errors).length > 0) {
+    throw new ApiError(400, 'Validation failed.', errors);
+  }
+}
+
+function calculateBookingPricing(payload, listing, bookingType) {
   let pricePerUnit;
   let unitsBooked;
 
-  switch (payload.bookingType) {
+  switch (bookingType) {
     case BOOKING_TYPES.PER_PERSON:
       pricePerUnit = listing.price.perPerson;
       unitsBooked = payload.numberOfGuests;
@@ -46,17 +164,29 @@ function calculateBookingPricing(payload, listing) {
     case BOOKING_TYPES.HOURLY:
       pricePerUnit = listing.price.hourly;
       unitsBooked = calculateHoursBetween(payload.startTime, payload.endTime);
+      if (unitsBooked < 0.5) {
+        throw new ApiError(400, 'Minimum booking duration is 30 minutes.');
+      }
+      unitsBooked = Number(unitsBooked.toFixed(2));
       break;
     case BOOKING_TYPES.DAILY:
       pricePerUnit = listing.price.daily;
-      unitsBooked = calculateDaysBetween(payload.startDate, payload.endDate);
+      unitsBooked =
+        payload.durationDays && payload.durationDays > 0
+          ? payload.durationDays
+          : calculateDaysBetween(payload.startDate, payload.endDate);
       break;
     default:
       throw new ApiError(400, 'Unsupported booking type.');
   }
 
   if (pricePerUnit === undefined || pricePerUnit === null) {
-    throw new ApiError(400, `This listing does not offer ${payload.bookingType} pricing.`);
+    const friendlyMode =
+      bookingType === BOOKING_TYPES.PER_PERSON ? 'per-person' : bookingType;
+    throw new ApiError(
+      400,
+      `This listing does not have a ${friendlyMode} price configured.`
+    );
   }
 
   const deliveryFee =
@@ -82,7 +212,13 @@ function calculateBookingPricing(payload, listing) {
 async function ensureSlotIsAvailable(payload) {
   const conflictingBooking = await Booking.findOne({
     listing: payload.listingId,
-    status: { $in: [BOOKING_STATUS.PENDING, BOOKING_STATUS.CONFIRMED] },
+    status: {
+      $in: [
+        BOOKING_STATUS.PENDING,
+        BOOKING_STATUS.AWAITING_HOST_APPROVAL,
+        BOOKING_STATUS.CONFIRMED,
+      ],
+    },
     startDate: { $lte: payload.endDate },
     endDate: { $gte: payload.startDate },
   });
@@ -121,10 +257,17 @@ function describeGuest(guest) {
   return fullName || guest.agencyName || guest.email || 'A guest';
 }
 
-async function notifyHostOfNewBooking(booking, listing, host, guest) {
-  if (!host) {
-    return;
-  }
+async function notifyHostOfBookingRequest(bookingId) {
+  const booking = await Booking.findById(bookingId);
+  if (!booking) return;
+
+  const [listing, host, guest] = await Promise.all([
+    Listing.findById(booking.listing),
+    User.findById(booking.host),
+    User.findById(booking.bookedBy),
+  ]);
+
+  if (!host) return;
 
   if (host.email) {
     try {
@@ -144,27 +287,71 @@ async function notifyHostOfNewBooking(booking, listing, host, guest) {
   const listingTitle = (listing && listing.title) || 'your listing';
 
   sendNotification(host._id, {
-    type: NOTIFICATION_TYPES.BOOKING_NEW,
-    title: 'New booking received',
-    body: `${guestName} booked ${listingTitle}.`,
+    type: NOTIFICATION_TYPES.BOOKING_REQUEST,
+    title: 'New booking request',
+    body: `${guestName} requested to book ${listingTitle}. Accept or decline within ${
+      booking.authExpiresAt
+        ? Math.max(1, Math.ceil((booking.authExpiresAt - Date.now()) / (1000 * 60 * 60 * 24)))
+        : 6
+    } days.`,
     data: {
-      bookingId: booking._id ? booking._id.toString() : '',
+      bookingId: booking._id.toString(),
       listingId: listing && listing._id ? listing._id.toString() : '',
       guestId: guest && guest._id ? guest._id.toString() : '',
     },
-  }).catch((error) => console.error('Failed to send booking push notification.', error));
+  }).catch((error) => console.error('Failed to send booking-request push notification.', error));
 }
 
-async function createBooking(payload, userId) {
+async function buildBookingQuote(payload, userId) {
   const listing = await Listing.findById(payload.listingId);
-
   if (!listing) {
     throw new ApiError(404, 'Listing not found.');
   }
-
   if (listing.createdBy.toString() === userId.toString()) {
     throw new ApiError(400, 'You cannot book your own listing.');
   }
+
+  const bookingType = resolveBookingType(payload, listing) || payload.bookingType;
+  if (!bookingType) {
+    throw new ApiError(
+      400,
+      'Could not determine booking mode for this listing. Listing category must be one of: activity, place, equipment.'
+    );
+  }
+
+  validateBookingInputsForType(payload, listing, bookingType);
+  const resolved = expandBookingTimes(payload, bookingType);
+  const pricing = calculateBookingPricing(resolved, listing, bookingType);
+
+  return {
+    listing,
+    bookingType,
+    resolved,
+    pricing,
+  };
+}
+
+async function getBookingQuote(payload, userId) {
+  const { listing, bookingType, resolved, pricing } = await buildBookingQuote(payload, userId);
+
+  return {
+    listingId: listing._id.toString(),
+    category: listing.category,
+    bookingType,
+    pricingMode: resolved.pricingMode || null,
+    startDate: resolved.startDate,
+    endDate: resolved.endDate,
+    startTime: resolved.startTime,
+    endTime: resolved.endTime,
+    numberOfGuests: resolved.numberOfGuests || null,
+    durationHours: resolved.durationHours || null,
+    durationDays: resolved.durationDays || null,
+    pricing,
+  };
+}
+
+async function createBooking(payload, userId) {
+  const { listing, bookingType, resolved, pricing } = await buildBookingQuote(payload, userId);
 
   const host = await User.findById(listing.createdBy).select('+stripeConnect email role agencyName');
   if (!host || !host.stripeConnect || !host.stripeConnect.accountId) {
@@ -180,20 +367,21 @@ async function createBooking(payload, userId) {
     );
   }
 
-  await ensureSlotIsAvailable(payload);
+  await ensureSlotIsAvailable(resolved);
 
-  const pricing = calculateBookingPricing(payload, listing);
+  const numberOfGuests =
+    bookingType === BOOKING_TYPES.PER_PERSON ? resolved.numberOfGuests : null;
 
   const booking = await Booking.create({
     listing: listing._id,
     bookedBy: userId,
     host: listing.createdBy,
-    bookingType: payload.bookingType,
-    startDate: payload.startDate,
-    endDate: payload.endDate,
-    startTime: payload.startTime,
-    endTime: payload.endTime,
-    numberOfGuests: payload.numberOfGuests,
+    bookingType,
+    startDate: resolved.startDate,
+    endDate: resolved.endDate,
+    startTime: resolved.startTime,
+    endTime: resolved.endTime,
+    numberOfGuests,
     pricePerUnit: pricing.pricePerUnit,
     unitsBooked: pricing.unitsBooked,
     subtotal: pricing.subtotal,
@@ -214,15 +402,41 @@ async function createBooking(payload, userId) {
   };
 }
 
-async function notifyHostAfterPayment(bookingId) {
-  const booking = await Booking.findById(bookingId);
-  if (!booking) return;
-  const [listing, host, guest] = await Promise.all([
-    Listing.findById(booking.listing),
-    User.findById(booking.host),
-    User.findById(booking.bookedBy),
-  ]);
-  await notifyHostOfNewBooking(booking, listing, host, guest);
+async function acceptBookingRequest(bookingId, hostUserId) {
+  const booking = await paymentsService.capturePaymentForBooking(bookingId, hostUserId);
+  return booking.toJSON();
+}
+
+async function declineBookingRequest(bookingId, hostUserId, reason) {
+  const { booking } = await paymentsService.cancelAuthorizationForBooking(
+    bookingId,
+    hostUserId,
+    reason
+  );
+
+  sendNotification(booking.bookedBy, {
+    type: NOTIFICATION_TYPES.BOOKING_DECLINED,
+    title: 'Booking declined',
+    body: reason
+      ? `The host declined your booking: ${reason}. Your card was not charged.`
+      : 'The host declined your booking. Your card was not charged.',
+    data: {
+      bookingId: booking._id.toString(),
+      listingId: booking.listing ? booking.listing.toString() : '',
+    },
+  }).catch((error) => console.error('Failed to notify guest of decline.', error));
+
+  sendNotification(booking.host, {
+    type: NOTIFICATION_TYPES.BOOKING_DECLINED,
+    title: 'Request declined',
+    body: 'You declined the booking request. The guest was not charged.',
+    data: {
+      bookingId: booking._id.toString(),
+      listingId: booking.listing ? booking.listing.toString() : '',
+    },
+  }).catch((error) => console.error('Failed to notify host of decline confirmation.', error));
+
+  return booking.toJSON();
 }
 
 async function getBookingsForGuest(userId, { page = 1, limit = 10 } = {}) {
@@ -308,6 +522,46 @@ async function cancelBooking(bookingId, userId) {
     throw new ApiError(400, 'Completed bookings cannot be cancelled.');
   }
 
+  if (booking.paymentStatus === PAYMENT_STATUS.AUTHORIZED) {
+    const result = await paymentsService.cancelAuthorizationForBooking(
+      bookingId,
+      userId,
+      isHost ? 'Declined by host.' : null
+    );
+
+    const otherParty = isGuest ? result.booking.host : result.booking.bookedBy;
+    if (otherParty) {
+      sendNotification(otherParty, {
+        type: NOTIFICATION_TYPES.BOOKING_CANCELLED,
+        title: 'Booking cancelled',
+        body: isGuest
+          ? 'The guest cancelled the booking. No charge was made.'
+          : 'The host cancelled the booking. Your card was not charged.',
+        data: {
+          bookingId: result.booking._id.toString(),
+          listingId: result.booking.listing ? result.booking.listing.toString() : '',
+          cancelledBy: userId.toString(),
+        },
+      }).catch((error) =>
+        console.error('Failed to send booking cancellation notification.', error)
+      );
+    }
+
+    sendNotification(userId, {
+      type: NOTIFICATION_TYPES.BOOKING_CANCELLED,
+      title: 'Booking cancelled',
+      body: 'The booking has been cancelled. No charge was made.',
+      data: {
+        bookingId: result.booking._id.toString(),
+        listingId: result.booking.listing ? result.booking.listing.toString() : '',
+      },
+    }).catch((error) =>
+      console.error('Failed to send booking cancellation confirmation.', error)
+    );
+
+    return result.booking.toJSON();
+  }
+
   booking.status = BOOKING_STATUS.CANCELLED;
   booking.cancelledAt = new Date();
   booking.cancelledBy = userId;
@@ -331,6 +585,18 @@ async function cancelBooking(bookingId, userId) {
     );
   }
 
+  sendNotification(userId, {
+    type: NOTIFICATION_TYPES.BOOKING_CANCELLED,
+    title: 'Booking cancelled',
+    body: 'You cancelled the booking.',
+    data: {
+      bookingId: booking._id.toString(),
+      listingId: booking.listing ? booking.listing.toString() : '',
+    },
+  }).catch((error) =>
+    console.error('Failed to send booking cancellation confirmation.', error)
+  );
+
   return booking.toJSON();
 }
 
@@ -348,9 +614,12 @@ function buildPagination(total, page, limit) {
 
 module.exports = {
   createBooking,
+  getBookingQuote,
   getBookingsForGuest,
   getBookingsForHost,
   getBookingByIdForUser,
   cancelBooking,
-  notifyHostAfterPayment,
+  acceptBookingRequest,
+  declineBookingRequest,
+  notifyHostOfBookingRequest,
 };

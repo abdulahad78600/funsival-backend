@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const app = require('./app');
 const config = require('./config/env');
 const connectDatabase = require('./config/database');
+const { startBookingAuthExpiryJob } = require('./jobs/booking-auth-expiry');
 
 let server;
 
@@ -13,6 +14,8 @@ async function startServer() {
     server = app.listen(config.port, () => {
       console.log(`Server running on http://localhost:${config.port}`);
     });
+
+    startBookingAuthExpiryJob();
   } catch (error) {
     console.error('Failed to start the server.');
     console.error(error.message);

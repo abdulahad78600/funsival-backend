@@ -7,7 +7,9 @@ const BOOKING_TYPES = {
 
 const BOOKING_STATUS = {
   PENDING: 'pending',
+  AWAITING_HOST_APPROVAL: 'awaiting_host_approval',
   CONFIRMED: 'confirmed',
+  DECLINED: 'declined',
   CANCELLED: 'cancelled',
   COMPLETED: 'completed',
 };
@@ -15,6 +17,8 @@ const BOOKING_STATUS = {
 const PAYMENT_STATUS = {
   REQUIRES_PAYMENT: 'requires_payment',
   PROCESSING: 'processing',
+  AUTHORIZED: 'authorized',
+  AUTH_RELEASED: 'auth_released',
   HELD: 'held',
   RELEASED: 'released',
   REFUNDED: 'refunded',
@@ -23,6 +27,8 @@ const PAYMENT_STATUS = {
 };
 
 const SERVICE_FEE_AMOUNT = 8;
+
+const HOST_APPROVAL_WINDOW_DAYS = 6;
 
 const REFUND_REQUEST_STATUS = {
   PENDING: 'pending',
@@ -42,4 +48,5 @@ module.exports = {
   REFUND_REQUEST_STATUS,
   AVAILABLE_REFUND_REQUEST_STATUSES: Object.values(REFUND_REQUEST_STATUS),
   SERVICE_FEE_AMOUNT,
+  HOST_APPROVAL_WINDOW_DAYS,
 };

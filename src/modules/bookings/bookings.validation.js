@@ -1,10 +1,7 @@
 const mongoose = require('mongoose');
 
 const ApiError = require('../../utils/api-error');
-const {
-  AVAILABLE_BOOKING_TYPES,
-  BOOKING_TYPES,
-} = require('../../constants/booking');
+const { AVAILABLE_BOOKING_TYPES } = require('../../constants/booking');
 
 function normalizeString(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -40,16 +37,22 @@ function validateBookingId(bookingId) {
   return bookingId;
 }
 
+const AVAILABLE_PRICING_MODES = ['hourly', 'daily'];
+
 function validateCreateBookingPayload(payload = {}) {
   const errors = {};
 
   const listingId = normalizeString(payload.listingId);
   const bookingType = normalizeString(payload.bookingType).toLowerCase();
+  const pricingMode = normalizeString(payload.pricingMode).toLowerCase();
   const startDate = payload.startDate;
   const endDate = payload.endDate;
   const startTime = normalizeString(payload.startTime);
   const endTime = normalizeString(payload.endTime);
   const numberOfGuests = payload.numberOfGuests;
+  const durationHours = payload.durationHours;
+  const durationDays = payload.durationDays;
+  const includeDelivery = Boolean(payload.includeDelivery);
 
   if (!listingId) {
     errors.listingId = 'Listing ID is required.';
@@ -57,10 +60,12 @@ function validateCreateBookingPayload(payload = {}) {
     errors.listingId = 'Listing ID is invalid.';
   }
 
-  if (!bookingType) {
-    errors.bookingType = 'Booking type is required.';
-  } else if (!AVAILABLE_BOOKING_TYPES.includes(bookingType)) {
+  if (bookingType && !AVAILABLE_BOOKING_TYPES.includes(bookingType)) {
     errors.bookingType = `Booking type must be one of: ${AVAILABLE_BOOKING_TYPES.join(', ')}.`;
+  }
+
+  if (pricingMode && !AVAILABLE_PRICING_MODES.includes(pricingMode)) {
+    errors.pricingMode = `Pricing mode must be one of: ${AVAILABLE_PRICING_MODES.join(', ')}.`;
   }
 
   if (!startDate) {
@@ -69,35 +74,33 @@ function validateCreateBookingPayload(payload = {}) {
     errors.startDate = 'Start date is invalid.';
   }
 
-  if (!endDate) {
-    errors.endDate = 'End date is required.';
-  } else if (!isValidDate(endDate)) {
+  if (endDate && !isValidDate(endDate)) {
     errors.endDate = 'End date is invalid.';
   }
 
-  if (
-    bookingType === BOOKING_TYPES.PER_PERSON ||
-    bookingType === BOOKING_TYPES.PER_HOUR ||
-    bookingType === BOOKING_TYPES.HOURLY
-  ) {
-    if (!startTime) {
-      errors.startTime = 'Start time is required.';
-    } else if (!isValidTime(startTime)) {
-      errors.startTime = 'Start time must be in HH:mm format.';
-    }
+  if (startTime && !isValidTime(startTime)) {
+    errors.startTime = 'Start time must be in HH:mm format.';
+  }
 
-    if (!endTime) {
-      errors.endTime = 'End time is required.';
-    } else if (!isValidTime(endTime)) {
-      errors.endTime = 'End time must be in HH:mm format.';
+  if (endTime && !isValidTime(endTime)) {
+    errors.endTime = 'End time must be in HH:mm format.';
+  }
+
+  if (numberOfGuests !== undefined && numberOfGuests !== null) {
+    if (!Number.isInteger(numberOfGuests) || numberOfGuests < 1) {
+      errors.numberOfGuests = 'Number of guests must be a positive integer.';
     }
   }
 
-  if (bookingType === BOOKING_TYPES.PER_PERSON) {
-    if (numberOfGuests === undefined || numberOfGuests === null) {
-      errors.numberOfGuests = 'Number of guests is required.';
-    } else if (!Number.isInteger(numberOfGuests) || numberOfGuests < 1) {
-      errors.numberOfGuests = 'Number of guests must be a positive integer.';
+  if (durationHours !== undefined && durationHours !== null) {
+    if (typeof durationHours !== 'number' || !Number.isFinite(durationHours) || durationHours < 0.5) {
+      errors.durationHours = 'Duration in hours must be a number at least 0.5.';
+    }
+  }
+
+  if (durationDays !== undefined && durationDays !== null) {
+    if (!Number.isInteger(durationDays) || durationDays < 1) {
+      errors.durationDays = 'Duration in days must be a positive integer.';
     }
   }
 
@@ -106,21 +109,27 @@ function validateCreateBookingPayload(payload = {}) {
   }
 
   const start = new Date(startDate);
-  const end = new Date(endDate);
+  const end = endDate ? new Date(endDate) : null;
 
-  if (end < start) {
+  if (end && end < start) {
     throw new ApiError(400, 'End date cannot be before start date.');
   }
 
   return {
     listingId,
-    bookingType,
+    bookingType: bookingType || null,
+    pricingMode: pricingMode || null,
     startDate: start,
     endDate: end,
     startTime: startTime || null,
     endTime: endTime || null,
     numberOfGuests:
-      bookingType === BOOKING_TYPES.PER_PERSON ? numberOfGuests : null,
+      numberOfGuests !== undefined && numberOfGuests !== null ? numberOfGuests : null,
+    durationHours:
+      durationHours !== undefined && durationHours !== null ? durationHours : null,
+    durationDays:
+      durationDays !== undefined && durationDays !== null ? durationDays : null,
+    includeDelivery,
   };
 }
 
