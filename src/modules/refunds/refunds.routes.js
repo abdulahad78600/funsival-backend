@@ -5,19 +5,23 @@ const { USER_ROLES } = require('../../constants/roles');
 const refundsController = require('./refunds.controller');
 
 const guestRouter = express.Router();
-guestRouter.use(authenticate);
-guestRouter.use(authorizeRoles(USER_ROLES.USER));
 
 guestRouter.post(
   '/:bookingId/refund-request',
+  authenticate,
+  authorizeRoles(USER_ROLES.USER),
   refundsController.createRefundRequestHandler
 );
 guestRouter.get(
   '/:bookingId/refund-request',
+  authenticate,
+  authorizeRoles(USER_ROLES.USER),
   refundsController.getMyRefundRequestHandler
 );
 guestRouter.delete(
   '/:bookingId/refund-request',
+  authenticate,
+  authorizeRoles(USER_ROLES.USER),
   refundsController.withdrawRefundRequestHandler
 );
 
