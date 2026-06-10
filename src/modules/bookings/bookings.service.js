@@ -394,11 +394,15 @@ async function createBooking(payload, userId) {
   });
 
   const guest = await User.findById(userId);
-  const checkout = await paymentsService.createCheckoutSession(booking._id, guest);
+  const payment = await paymentsService.authorizeBookingPayment(
+    booking._id,
+    guest,
+    payload.paymentMethodId
+  );
 
   return {
     booking: booking.toJSON(),
-    checkout,
+    payment,
   };
 }
 

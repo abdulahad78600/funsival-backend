@@ -12,6 +12,22 @@ const ALLOWED_IMAGE_MIME_TYPES = new Set([
   'image/webp',
 ]);
 
+const ALLOWED_CHAT_VIDEO_MIME_TYPES = new Set([
+  'video/mp4',
+  'video/quicktime',
+  'video/webm',
+  'video/x-matroska',
+  'video/3gpp',
+]);
+
+const CHAT_MEDIA_MAX_SIZE_BYTES = 50 * 1024 * 1024;
+
+function resolveChatMediaType(mimetype) {
+  if (ALLOWED_IMAGE_MIME_TYPES.has(mimetype)) return 'image';
+  if (ALLOWED_CHAT_VIDEO_MIME_TYPES.has(mimetype)) return 'video';
+  return null;
+}
+
 const storage = multer.memoryStorage();
 
 const upload = multer({
@@ -20,6 +36,23 @@ const upload = multer({
   fileFilter: (req, file, cb) => {
     if (!ALLOWED_IMAGE_MIME_TYPES.has(file.mimetype)) {
       cb(new ApiError(400, 'Only JPG, PNG, WEBP, and GIF images are allowed.'));
+    } else {
+      cb(null, true);
+    }
+  },
+});
+
+const chatMediaUpload = multer({
+  storage,
+  limits: { files: 1, fileSize: CHAT_MEDIA_MAX_SIZE_BYTES },
+  fileFilter: (req, file, cb) => {
+    if (!resolveChatMediaType(file.mimetype)) {
+      cb(
+        new ApiError(
+          400,
+          'Only JPG, PNG, WEBP, GIF images and MP4, MOV, WEBM, MKV, 3GP videos are allowed in chat.'
+        )
+      );
     } else {
       cb(null, true);
     }
@@ -61,6 +94,8 @@ async function uploadImagesToSpacesHandler(req, res) {
 
 module.exports = {
   upload,
+  chatMediaUpload,
   uploadImagesToSpacesHandler,
   uploadFileToSpaces,
+  resolveChatMediaType,
 };

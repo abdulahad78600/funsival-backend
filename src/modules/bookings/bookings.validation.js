@@ -53,6 +53,7 @@ function validateCreateBookingPayload(payload = {}) {
   const durationHours = payload.durationHours;
   const durationDays = payload.durationDays;
   const includeDelivery = Boolean(payload.includeDelivery);
+  const paymentMethodId = normalizeString(payload.paymentMethodId);
 
   if (!listingId) {
     errors.listingId = 'Listing ID is required.';
@@ -104,6 +105,12 @@ function validateCreateBookingPayload(payload = {}) {
     }
   }
 
+  if (!paymentMethodId) {
+    errors.paymentMethodId = 'Please select a saved card to pay with.';
+  } else if (!paymentMethodId.startsWith('pm_')) {
+    errors.paymentMethodId = 'Payment method ID is invalid.';
+  }
+
   if (Object.keys(errors).length > 0) {
     throw new ApiError(400, 'Validation failed.', errors);
   }
@@ -130,6 +137,7 @@ function validateCreateBookingPayload(payload = {}) {
     durationDays:
       durationDays !== undefined && durationDays !== null ? durationDays : null,
     includeDelivery,
+    paymentMethodId,
   };
 }
 

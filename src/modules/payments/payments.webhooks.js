@@ -20,25 +20,6 @@ async function dispatchEvent(event) {
       await paymentsService.handlePaymentIntentSucceeded(event.data.object);
       return;
     }
-    case 'checkout.session.completed': {
-      const obj = event.data.object;
-      const paymentIntentId =
-        typeof obj.payment_intent === 'string'
-          ? obj.payment_intent
-          : obj.payment_intent && obj.payment_intent.id;
-      if (!paymentIntentId) return;
-      const stripeAccount = event.account;
-      const paymentIntent = await stripe.paymentIntents.retrieve(
-        paymentIntentId,
-        stripeAccount ? { stripeAccount } : undefined
-      );
-      if (paymentIntent.status === 'requires_capture') {
-        await paymentsService.handlePaymentIntentAuthorized(paymentIntent);
-      } else if (paymentIntent.status === 'succeeded') {
-        await paymentsService.handlePaymentIntentSucceeded(paymentIntent);
-      }
-      return;
-    }
     case 'charge.refunded':
       await paymentsService.handleChargeRefunded(event.data.object);
       return;

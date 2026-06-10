@@ -1,4 +1,9 @@
 const asyncHandler = require('../../utils/async-handler');
+const ApiError = require('../../utils/api-error');
+const {
+  uploadFileToSpaces,
+  resolveChatMediaType,
+} = require('../../services/do-spaces.upload');
 const {
   validateConversationId,
   validateMessageId,
@@ -127,6 +132,31 @@ const editMessageHandler = asyncHandler(async (req, res) => {
   });
 });
 
+const uploadChatMediaHandler = asyncHandler(async (req, res) => {
+  if (!req.file) {
+    throw new ApiError(400, 'A media file is required (form field: "file").');
+  }
+
+  const mediaType = resolveChatMediaType(req.file.mimetype);
+  if (!mediaType) {
+    throw new ApiError(400, 'Unsupported media type.');
+  }
+
+  const uploaded = await uploadFileToSpaces(req.file, `chats/${mediaType}s`);
+
+  res.status(201).json({
+    success: true,
+    message: 'Chat media uploaded successfully.',
+    data: {
+      mediaType,
+      mediaUrl: uploaded.url,
+      mimeType: uploaded.contentType,
+      fileName: req.file.originalname,
+      fileSize: uploaded.size,
+    },
+  });
+});
+
 const deleteMessageHandler = asyncHandler(async (req, res) => {
   const conversationId = validateConversationId(req.params.conversationId);
   const messageId = validateMessageId(req.params.messageId);
@@ -150,4 +180,5 @@ module.exports = {
   markMessageReadHandler,
   editMessageHandler,
   deleteMessageHandler,
+  uploadChatMediaHandler,
 };

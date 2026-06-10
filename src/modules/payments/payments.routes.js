@@ -28,10 +28,10 @@ router.post(
 );
 
 router.post(
-  '/bookings/:bookingId/checkout',
+  '/bookings/:bookingId/pay',
   authenticate,
   authorizeRoles(USER_ROLES.USER),
-  paymentsController.createCheckoutSessionHandler
+  paymentsController.authorizeBookingPaymentHandler
 );
 
 router.post(

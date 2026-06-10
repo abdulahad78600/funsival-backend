@@ -7,6 +7,7 @@ const bookingsRoutes = require('../modules/bookings/bookings.routes');
 const chatsRoutes = require('../modules/chats/chats.routes');
 const notificationsRoutes = require('../modules/notifications/notifications.routes');
 const paymentsRoutes = require('../modules/payments/payments.routes');
+const cardsRoutes = require('../modules/cards/cards.routes');
 const { guestRouter: refundsGuestRouter, adminRouter: refundsAdminRouter } = require('../modules/refunds/refunds.routes');
 
 const router = express.Router();
@@ -19,6 +20,7 @@ router.use('/bookings', bookingsRoutes);
 router.use('/chats', chatsRoutes);
 router.use('/notifications', notificationsRoutes);
 router.use('/payments', paymentsRoutes);
+router.use('/payments/cards', cardsRoutes);
 router.use('/admin/refund-requests', refundsAdminRouter);
 
 module.exports = router;

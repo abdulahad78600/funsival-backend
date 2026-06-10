@@ -241,6 +241,16 @@ const userSchema = new mongoose.Schema(
       default: () => ({}),
       select: false,
     },
+    stripeCustomerId: {
+      type: String,
+      default: null,
+      select: false,
+    },
+    defaultPaymentMethodId: {
+      type: String,
+      default: null,
+      select: false,
+    },
   },
   {
     timestamps: true,

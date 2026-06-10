@@ -359,3 +359,4 @@ MAIL_FROM=your-email@example.com
 
 Set `API_BASE_URL` to your deployed backend domain in production so uploaded listing image URLs point to the correct host.
 Set `FRONTEND_URL` as a comma-separated allowlist when you need multiple frontends, for example `http://localhost:3000,https://testing.funsival.com,https://funsival.com,https://www.funsival.com`.
+For Stripe redirects, set `STRIPE_ONBOARDING_RETURN_URL` to the host post-connect page and `STRIPE_CHECKOUT_SUCCESS_URL` to the guest booking success page. The current testing defaults are `https://testing.funsival.com/dashboard/listings` and `https://testing.funsival.com/user-dashboard/booking-success`.

@@ -5,10 +5,16 @@ const ApiError = require('../../utils/api-error');
 const MESSAGE_TYPES = Object.freeze({
   TEXT: 'text',
   IMAGE: 'image',
+  VIDEO: 'video',
   FILE: 'file',
 });
 
 const AVAILABLE_MESSAGE_TYPES = Object.values(MESSAGE_TYPES);
+const MEDIA_MESSAGE_TYPES = new Set([
+  MESSAGE_TYPES.IMAGE,
+  MESSAGE_TYPES.VIDEO,
+  MESSAGE_TYPES.FILE,
+]);
 const MAX_TEXT_LENGTH = 4000;
 
 function normalizeString(value) {
@@ -95,6 +101,13 @@ function validateSendMessagePayload(payload = {}) {
   const type = normalizeString(payload.type).toLowerCase() || MESSAGE_TYPES.TEXT;
   const text = normalizeString(payload.text);
   const mediaUrl = normalizeString(payload.mediaUrl);
+  const thumbnailUrl = normalizeString(payload.thumbnailUrl);
+  const mimeType = normalizeString(payload.mimeType);
+  const fileName = normalizeString(payload.fileName);
+  const fileSize =
+    payload.fileSize === undefined || payload.fileSize === null
+      ? null
+      : Number(payload.fileSize);
 
   if (!AVAILABLE_MESSAGE_TYPES.includes(type)) {
     errors.type = `Message type must be one of: ${AVAILABLE_MESSAGE_TYPES.join(', ')}.`;
@@ -108,10 +121,20 @@ function validateSendMessagePayload(payload = {}) {
     }
   }
 
-  if (type === MESSAGE_TYPES.IMAGE || type === MESSAGE_TYPES.FILE) {
+  if (MEDIA_MESSAGE_TYPES.has(type)) {
     if (!mediaUrl) {
-      errors.mediaUrl = 'Media URL is required for image or file messages.';
+      errors.mediaUrl = 'Media URL is required for image, video, or file messages.';
+    } else if (!/^https?:\/\//i.test(mediaUrl)) {
+      errors.mediaUrl = 'Media URL must be a valid http(s) URL.';
     }
+  }
+
+  if (fileSize !== null && (!Number.isFinite(fileSize) || fileSize < 0)) {
+    errors.fileSize = 'File size must be a non-negative number.';
+  }
+
+  if (text && text.length > MAX_TEXT_LENGTH) {
+    errors.text = `Message caption cannot exceed ${MAX_TEXT_LENGTH} characters.`;
   }
 
   if (Object.keys(errors).length > 0) {
@@ -122,6 +145,10 @@ function validateSendMessagePayload(payload = {}) {
     type,
     text: text || null,
     mediaUrl: mediaUrl || null,
+    thumbnailUrl: thumbnailUrl || null,
+    mimeType: mimeType || null,
+    fileName: fileName || null,
+    fileSize: fileSize !== null && Number.isFinite(fileSize) ? fileSize : null,
   };
 }
 

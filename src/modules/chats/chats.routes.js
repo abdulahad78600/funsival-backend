@@ -1,6 +1,7 @@
 const express = require('express');
 
 const { authenticate } = require('../../middlewares/auth.middleware');
+const { chatMediaUpload } = require('../../services/do-spaces.upload');
 const chatsController = require('./chats.controller');
 
 const router = express.Router();
@@ -8,6 +9,12 @@ const router = express.Router();
 router.use(authenticate);
 
 router.post('/token', chatsController.issueFirebaseTokenHandler);
+
+router.post(
+  '/media',
+  chatMediaUpload.single('file'),
+  chatsController.uploadChatMediaHandler
+);
 
 router.post('/conversations', chatsController.startConversationHandler);
 router.get('/conversations', chatsController.listConversationsHandler);

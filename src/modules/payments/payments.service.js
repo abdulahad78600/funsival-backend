@@ -114,11 +114,12 @@ async function createOnboardingLink(userId, { country } = {}) {
   }
 
   const accountId = await getOrCreateConnectedAccount(user, country);
+  const returnUrl = resolveOnboardingReturnUrl(userId);
 
   const link = await stripe.accountLinks.create({
     account: accountId,
     refresh_url: env.stripe.onboardingRefreshUrl,
-    return_url: resolveOnboardingReturnUrl(userId),
+    return_url: returnUrl,
     type: 'account_onboarding',
   });
 
@@ -126,6 +127,7 @@ async function createOnboardingLink(userId, { country } = {}) {
     url: link.url,
     expiresAt: new Date(link.expires_at * 1000),
     accountId,
+    returnUrl,
   };
 }
 
@@ -176,7 +178,11 @@ async function createLoginLink(userId) {
   return { url: link.url };
 }
 
-async function createCheckoutSession(bookingId, guestUser) {
+async function authorizeBookingPayment(bookingId, guestUser, paymentMethodId) {
+  if (!paymentMethodId || typeof paymentMethodId !== 'string') {
+    throw new ApiError(400, 'A saved card (paymentMethodId) is required to pay.');
+  }
+
   const booking = await Booking.findById(bookingId);
   if (!booking) {
     throw new ApiError(404, 'Booking not found.');
@@ -186,16 +192,23 @@ async function createCheckoutSession(bookingId, guestUser) {
     throw new ApiError(403, 'You are not allowed to pay for this booking.');
   }
 
-  if (booking.paymentStatus === PAYMENT_STATUS.HELD) {
-    throw new ApiError(400, 'Booking is already paid.');
+  if (
+    booking.paymentStatus === PAYMENT_STATUS.HELD ||
+    booking.paymentStatus === PAYMENT_STATUS.AUTHORIZED ||
+    booking.paymentStatus === PAYMENT_STATUS.RELEASED
+  ) {
+    throw new ApiError(400, 'Booking is already paid or authorized.');
   }
   if (booking.status === BOOKING_STATUS.CANCELLED) {
     throw new ApiError(400, 'Booking is cancelled.');
   }
 
-  const [host, listing] = await Promise.all([
+  const cardsService = require('../cards/cards.service');
+  const [host, freshGuest] = await Promise.all([
     User.findById(booking.host).select('+stripeConnect email'),
-    Listing.findById(booking.listing),
+    User.findById(guestUser._id).select(
+      '+stripeCustomerId +defaultPaymentMethodId email providerProfile agencyName'
+    ),
   ]);
 
   if (!host || !host.stripeConnect || !host.stripeConnect.accountId) {
@@ -204,60 +217,75 @@ async function createCheckoutSession(bookingId, guestUser) {
   if (!host.stripeConnect.chargesEnabled) {
     throw new ApiError(400, 'Host payout account is not yet ready to accept payments.');
   }
+  if (!freshGuest) {
+    throw new ApiError(404, 'Guest account not found.');
+  }
+
+  const customerId = await cardsService.getOrCreatePlatformCustomer(freshGuest);
+
+  const paymentMethod = await stripe.paymentMethods.retrieve(paymentMethodId);
+  if (paymentMethod.customer && paymentMethod.customer !== customerId) {
+    throw new ApiError(403, 'This card does not belong to you.');
+  }
+  if (!paymentMethod.customer) {
+    await stripe.paymentMethods.attach(paymentMethodId, { customer: customerId });
+  }
 
   const currency = (booking.currency || 'USD').toLowerCase();
   const applicationFeeAmount = calculateApplicationFee(booking.totalAmount, currency);
-  const { successUrl, cancelUrl } = resolveCheckoutUrls(booking._id);
 
-  const session = await stripe.checkout.sessions.create(
+  const paymentIntent = await stripe.paymentIntents.create(
     {
-      mode: 'payment',
-      customer_email: guestUser.email,
-      line_items: [
-        {
-          price_data: {
-            currency,
-            unit_amount: toStripeAmount(booking.totalAmount, currency),
-            product_data: {
-              name: (listing && listing.title) || 'Funsival Booking',
-              description: `Booking #${booking._id}`,
-            },
-          },
-          quantity: 1,
-        },
-      ],
-      payment_intent_data: {
-        capture_method: 'manual',
-        application_fee_amount: applicationFeeAmount,
-        metadata: {
-          bookingId: String(booking._id),
-          guestId: String(guestUser._id),
-          hostId: String(host._id),
-        },
-      },
+      amount: toStripeAmount(booking.totalAmount, currency),
+      currency,
+      customer: customerId,
+      payment_method: paymentMethodId,
+      payment_method_types: ['card'],
+      capture_method: 'manual',
+      confirm: true,
+      off_session: false,
+      setup_future_usage: 'off_session',
+      application_fee_amount: applicationFeeAmount,
+      transfer_data: { destination: host.stripeConnect.accountId },
+      description: `Funsival Booking #${booking._id}`,
       metadata: {
         bookingId: String(booking._id),
-        guestId: String(guestUser._id),
+        guestId: String(freshGuest._id),
         hostId: String(host._id),
       },
-      success_url: successUrl,
-      cancel_url: cancelUrl,
     },
     {
-      stripeAccount: host.stripeConnect.accountId,
+      idempotencyKey: `booking_${booking._id}_authorize`,
     }
   );
 
   booking.stripeAccountId = host.stripeConnect.accountId;
-  booking.stripeCheckoutSessionId = session.id;
+  booking.stripePaymentIntentId = paymentIntent.id;
   booking.applicationFeeAmount = fromStripeAmount(applicationFeeAmount, currency);
   booking.paymentStatus = PAYMENT_STATUS.PROCESSING;
   await booking.save();
 
+  const { successUrl } = resolveCheckoutUrls(booking._id);
+
+  if (!freshGuest.defaultPaymentMethodId) {
+    freshGuest.defaultPaymentMethodId = paymentMethodId;
+    await freshGuest.save();
+    await stripe.customers
+      .update(customerId, {
+        invoice_settings: { default_payment_method: paymentMethodId },
+      })
+      .catch((error) =>
+        console.error('Failed to set default payment method on Stripe customer.', error)
+      );
+  }
+
   return {
-    url: session.url,
-    sessionId: session.id,
-    expiresAt: session.expires_at ? new Date(session.expires_at * 1000) : null,
+    paymentIntentId: paymentIntent.id,
+    clientSecret: paymentIntent.client_secret,
+    status: paymentIntent.status,
+    requiresAction: paymentIntent.status === 'requires_action',
+    nextAction: paymentIntent.next_action || null,
+    successUrl,
   };
 }
 
@@ -382,11 +410,7 @@ async function capturePaymentForBooking(bookingId, hostUserId) {
     );
   }
 
-  const paymentIntent = await stripe.paymentIntents.capture(
-    booking.stripePaymentIntentId,
-    {},
-    { stripeAccount: booking.stripeAccountId }
-  );
+  const paymentIntent = await stripe.paymentIntents.capture(booking.stripePaymentIntentId);
 
   await markBookingPaid(booking, paymentIntent);
   return booking;
@@ -414,11 +438,9 @@ async function cancelAuthorizationForBooking(bookingId, actorUserId, reason) {
     throw new ApiError(400, 'Booking is missing Stripe payment information.');
   }
 
-  await stripe.paymentIntents.cancel(
-    booking.stripePaymentIntentId,
-    { cancellation_reason: 'requested_by_customer' },
-    { stripeAccount: booking.stripeAccountId }
-  );
+  await stripe.paymentIntents.cancel(booking.stripePaymentIntentId, {
+    cancellation_reason: 'requested_by_customer',
+  });
 
   booking.paymentStatus = PAYMENT_STATUS.AUTH_RELEASED;
   booking.status = isHost ? BOOKING_STATUS.DECLINED : BOOKING_STATUS.CANCELLED;
@@ -454,22 +476,18 @@ async function executeStripeRefund(booking, adminUserId, reason) {
     );
   }
 
-  const refund = await stripe.refunds.create(
-    {
-      payment_intent: booking.stripePaymentIntentId,
-      refund_application_fee: true,
-      reason: reason && ['duplicate', 'fraudulent', 'requested_by_customer'].includes(reason)
-        ? reason
-        : 'requested_by_customer',
-      metadata: {
-        bookingId: String(booking._id),
-        adminId: String(adminUserId),
-      },
+  const refund = await stripe.refunds.create({
+    payment_intent: booking.stripePaymentIntentId,
+    refund_application_fee: true,
+    reverse_transfer: true,
+    reason: reason && ['duplicate', 'fraudulent', 'requested_by_customer'].includes(reason)
+      ? reason
+      : 'requested_by_customer',
+    metadata: {
+      bookingId: String(booking._id),
+      adminId: String(adminUserId),
     },
-    {
-      stripeAccount: booking.stripeAccountId,
-    }
-  );
+  });
 
   booking.paymentStatus = PAYMENT_STATUS.REFUNDED;
   booking.status = BOOKING_STATUS.CANCELLED;
@@ -639,7 +657,7 @@ module.exports = {
   createOnboardingLink,
   getConnectAccountStatus,
   createLoginLink,
-  createCheckoutSession,
+  authorizeBookingPayment,
   capturePaymentForBooking,
   cancelAuthorizationForBooking,
   refundBooking,

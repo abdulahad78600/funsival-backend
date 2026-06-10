@@ -58,14 +58,19 @@ function serializeConversation(docId, data) {
 }
 
 function serializeMessage(docId, data) {
+  const isDeleted = !!data.deleted;
   return {
     id: docId,
     senderId: data.senderId,
     type: data.type || MESSAGE_TYPES.TEXT,
-    text: data.deleted ? null : data.text || null,
-    mediaUrl: data.deleted ? null : data.mediaUrl || null,
+    text: isDeleted ? null : data.text || null,
+    mediaUrl: isDeleted ? null : data.mediaUrl || null,
+    thumbnailUrl: isDeleted ? null : data.thumbnailUrl || null,
+    mimeType: isDeleted ? null : data.mimeType || null,
+    fileName: isDeleted ? null : data.fileName || null,
+    fileSize: isDeleted ? null : data.fileSize ?? null,
     readBy: data.readBy || [],
-    deleted: !!data.deleted,
+    deleted: isDeleted,
     deletedAt: serializeFirestoreTimestamp(data.deletedAt),
     edited: !!data.edited,
     editedAt: serializeFirestoreTimestamp(data.editedAt),
@@ -184,17 +189,27 @@ async function sendMessage(currentUserId, conversationId, payload) {
     type: payload.type,
     text: payload.text,
     mediaUrl: payload.mediaUrl,
+    thumbnailUrl: payload.thumbnailUrl || null,
+    mimeType: payload.mimeType || null,
+    fileName: payload.fileName || null,
+    fileSize: payload.fileSize ?? null,
     readBy: [senderId],
     createdAt: now,
   };
 
+  let previewText;
+  if (payload.type === MESSAGE_TYPES.TEXT) {
+    previewText = payload.text;
+  } else if (payload.type === MESSAGE_TYPES.IMAGE) {
+    previewText = '[Image]';
+  } else if (payload.type === MESSAGE_TYPES.VIDEO) {
+    previewText = '[Video]';
+  } else {
+    previewText = '[File]';
+  }
+
   const lastMessagePreview = {
-    text:
-      payload.type === MESSAGE_TYPES.TEXT
-        ? payload.text
-        : payload.type === MESSAGE_TYPES.IMAGE
-        ? '[Image]'
-        : '[File]',
+    text: previewText,
     senderId,
     type: payload.type,
     createdAt: now,
@@ -488,6 +503,10 @@ async function deleteMessage(currentUserId, conversationId, messageId) {
     deletedAt: now,
     text: null,
     mediaUrl: null,
+    thumbnailUrl: null,
+    mimeType: null,
+    fileName: null,
+    fileSize: null,
   });
 
   const conversation = conversationSnap.data();

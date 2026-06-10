@@ -38,12 +38,20 @@ const createLoginLinkHandler = asyncHandler(async (req, res) => {
   });
 });
 
-const createCheckoutSessionHandler = asyncHandler(async (req, res) => {
+const authorizeBookingPaymentHandler = asyncHandler(async (req, res) => {
   const bookingId = validateBookingId(req.params.bookingId);
-  const result = await paymentsService.createCheckoutSession(bookingId, req.user);
+  const paymentMethodId =
+    req.body && typeof req.body.paymentMethodId === 'string'
+      ? req.body.paymentMethodId
+      : null;
+  const result = await paymentsService.authorizeBookingPayment(
+    bookingId,
+    req.user,
+    paymentMethodId
+  );
   res.status(200).json({
     success: true,
-    message: 'Checkout session created.',
+    message: 'Card authorization initiated.',
     data: result,
   });
 });
@@ -63,6 +71,6 @@ module.exports = {
   startOnboardingHandler,
   getConnectStatusHandler,
   createLoginLinkHandler,
-  createCheckoutSessionHandler,
+  authorizeBookingPaymentHandler,
   refundBookingHandler,
 };

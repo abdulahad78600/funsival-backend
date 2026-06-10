@@ -59,13 +59,13 @@ module.exports = {
     connectCountry: normalizeString(process.env.STRIPE_CONNECT_COUNTRY) || 'US',
     checkoutSuccessUrl:
       normalizeString(process.env.STRIPE_CHECKOUT_SUCCESS_URL) ||
-      'https://testing.funsival.com/bookings/{BOOKING_ID}?status=success',
+      'https://testing.funsival.com/user-dashboard/booking-success',
     checkoutCancelUrl:
       normalizeString(process.env.STRIPE_CHECKOUT_CANCEL_URL) ||
       'https://testing.funsival.com/bookings/{BOOKING_ID}?status=cancelled',
     onboardingReturnUrl:
       normalizeString(process.env.STRIPE_ONBOARDING_RETURN_URL) ||
-      'https://testing.funsival.com/payments/onboarding/complete',
+      'https://testing.funsival.com/dashboard/listings',
     onboardingRefreshUrl:
       normalizeString(process.env.STRIPE_ONBOARDING_REFRESH_URL) ||
       'https://testing.funsival.com/payments/onboarding/refresh',
