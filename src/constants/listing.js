@@ -8,7 +8,18 @@ const AVAILABLE_LISTING_CATEGORIES = Object.values(LISTING_CATEGORIES);
 
 function normalizeCategory(value) {
   if (typeof value !== 'string') return '';
-  return value.trim().toLowerCase();
+  const normalized = value.trim().toLowerCase();
+
+  switch (normalized) {
+    case 'activities':
+      return LISTING_CATEGORIES.ACTIVITY;
+    case 'places':
+      return LISTING_CATEGORIES.PLACE;
+    case 'equipments':
+      return LISTING_CATEGORIES.EQUIPMENT;
+    default:
+      return normalized;
+  }
 }
 
 module.exports = {

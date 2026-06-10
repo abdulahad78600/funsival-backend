@@ -37,8 +37,15 @@ function calculateDaysBetween(startDate, endDate) {
   return Math.max(days, 1);
 }
 
+function hasConfiguredPrice(value) {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
 function resolveBookingType(payload, listing) {
   const category = normalizeCategory(listing && listing.category);
+  const mode = String(payload.pricingMode || '').trim().toLowerCase();
+  const price = (listing && listing.price) || {};
+
   if (category === LISTING_CATEGORIES.ACTIVITY) {
     return BOOKING_TYPES.PER_PERSON;
   }
@@ -46,10 +53,44 @@ function resolveBookingType(payload, listing) {
     category === LISTING_CATEGORIES.PLACE ||
     category === LISTING_CATEGORIES.EQUIPMENT
   ) {
-    const mode = String(payload.pricingMode || '').trim().toLowerCase();
     if (mode === 'daily') return BOOKING_TYPES.DAILY;
-    if (mode === 'hourly' || mode === '') return BOOKING_TYPES.HOURLY;
+    if (mode === 'hourly') return BOOKING_TYPES.HOURLY;
+    if (mode === '') {
+      if (hasConfiguredPrice(price.hourly) && !hasConfiguredPrice(price.daily)) {
+        return BOOKING_TYPES.HOURLY;
+      }
+      if (hasConfiguredPrice(price.daily) && !hasConfiguredPrice(price.hourly)) {
+        return BOOKING_TYPES.DAILY;
+      }
+      return BOOKING_TYPES.HOURLY;
+    }
   }
+
+  // Some existing listings use broader category labels like "Adventure".
+  // Fall back to the configured prices so booking still works for them.
+  if (mode === 'daily' && hasConfiguredPrice(price.daily)) {
+    return BOOKING_TYPES.DAILY;
+  }
+  if (mode === 'hourly' && hasConfiguredPrice(price.hourly)) {
+    return BOOKING_TYPES.HOURLY;
+  }
+  if (
+    hasConfiguredPrice(price.perPerson) &&
+    !hasConfiguredPrice(price.hourly) &&
+    !hasConfiguredPrice(price.daily)
+  ) {
+    return BOOKING_TYPES.PER_PERSON;
+  }
+  if (hasConfiguredPrice(price.hourly) && !hasConfiguredPrice(price.daily)) {
+    return BOOKING_TYPES.HOURLY;
+  }
+  if (hasConfiguredPrice(price.daily) && !hasConfiguredPrice(price.hourly)) {
+    return BOOKING_TYPES.DAILY;
+  }
+  if (mode === '' && hasConfiguredPrice(price.hourly)) {
+    return BOOKING_TYPES.HOURLY;
+  }
+
   return null;
 }
 
