@@ -7,6 +7,11 @@ const {
   findUnusedLocalListingPhotos,
   serializeListingRecord,
 } = require('./listing-images');
+const {
+  buildEmptyReviewSummary,
+  buildListingReviewSummaryMap,
+  buildHostReviewSummaryMap,
+} = require('../reviews/reviews.service');
 
 function mergeListingPayload(existingListing, payload) {
   const currentListing = existingListing.toObject({ depopulate: true });
@@ -54,6 +59,51 @@ async function cleanupUnusedListingPhotos(photos = []) {
   }
 }
 
+async function attachReviewSummariesToListings(listings = []) {
+  if (!Array.isArray(listings) || listings.length === 0) {
+    return [];
+  }
+
+  const listingIds = listings.map((listing) => listing.id || listing._id).filter(Boolean);
+  const hostIds = listings
+    .map((listing) => {
+      if (listing.host && listing.host.id) return listing.host.id;
+      if (typeof listing.createdBy === 'string') return listing.createdBy;
+      if (listing.createdBy && listing.createdBy._id) return listing.createdBy._id.toString();
+      return '';
+    })
+    .filter(Boolean);
+
+  const [listingSummaryMap, hostSummaryMap] = await Promise.all([
+    buildListingReviewSummaryMap(listingIds),
+    buildHostReviewSummaryMap(hostIds),
+  ]);
+
+  return listings.map((listing) => {
+    const listingId = String(listing.id || listing._id || '');
+    const hostId = listing.host?.id
+      ? String(listing.host.id)
+      : typeof listing.createdBy === 'string'
+        ? listing.createdBy
+        : listing.createdBy && listing.createdBy._id
+          ? listing.createdBy._id.toString()
+          : '';
+
+    return {
+      ...listing,
+      reviewSummary: listingSummaryMap.get(listingId) || buildEmptyReviewSummary(),
+      ...(listing.host
+        ? {
+            host: {
+              ...listing.host,
+              reviewSummary: hostSummaryMap.get(hostId) || buildEmptyReviewSummary(),
+            },
+          }
+        : {}),
+    };
+  });
+}
+
 async function ensureHostStripeConnected(userId) {
   const user = await User.findById(userId).select('+stripeConnect');
   if (!user) {
@@ -83,7 +133,10 @@ async function createListing(payload, userId) {
     createdBy: userId,
   });
 
-  return serializeListingRecord(listing.toJSON());
+  const [serializedListing] = await attachReviewSummariesToListings([
+    serializeListingRecord(listing.toJSON()),
+  ]);
+  return serializedListing;
 }
 
 async function getListingsForUser(userId, { page = 1, limit = 10 } = {}) {
@@ -95,8 +148,10 @@ async function getListingsForUser(userId, { page = 1, limit = 10 } = {}) {
     Listing.countDocuments(filter),
   ]);
 
+  const serializedListings = listings.map((listing) => serializeListingRecord(listing.toJSON()));
+
   return {
-    listings: listings.map((listing) => serializeListingRecord(listing.toJSON())),
+    listings: await attachReviewSummariesToListings(serializedListings),
     pagination: {
       total,
       page,
@@ -115,7 +170,10 @@ async function getListingForUser(listingId, userId) {
     throw new ApiError(404, 'Listing not found.');
   }
 
-  return serializeListingRecord(listing.toJSON());
+  const [serializedListing] = await attachReviewSummariesToListings([
+    serializeListingRecord(listing.toJSON()),
+  ]);
+  return serializedListing;
 }
 
 async function browseListings({
@@ -201,8 +259,10 @@ async function browseListings({
 
   const totalPages = Math.ceil(total / limit);
 
+  const serializedListings = listings.map((listing) => serializeListingRecord(listing.toJSON()));
+
   return {
-    listings: listings.map((listing) => serializeListingRecord(listing.toJSON())),
+    listings: await attachReviewSummariesToListings(serializedListings),
     pagination: {
       total,
       page,
@@ -224,7 +284,10 @@ async function getListingById(listingId) {
     throw new ApiError(404, 'Listing not found.');
   }
 
-  return serializeListingRecord(listing.toJSON());
+  const [serializedListing] = await attachReviewSummariesToListings([
+    serializeListingRecord(listing.toJSON()),
+  ]);
+  return serializedListing;
 }
 
 async function updateListingForUser(listingId, payload, userId) {
@@ -244,7 +307,10 @@ async function updateListingForUser(listingId, payload, userId) {
   await existingListing.save();
   await cleanupUnusedListingPhotos(removedPhotos);
 
-  return serializeListingRecord(existingListing.toJSON());
+  const [serializedListing] = await attachReviewSummariesToListings([
+    serializeListingRecord(existingListing.toJSON()),
+  ]);
+  return serializedListing;
 }
 
 async function deleteListingForUser(listingId, userId) {

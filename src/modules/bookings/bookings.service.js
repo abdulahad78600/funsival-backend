@@ -14,6 +14,7 @@ const {
   normalizeCategory,
 } = require('../../constants/listing');
 const paymentsService = require('../payments/payments.service');
+const { attachReviewDataToBookings } = require('../reviews/reviews.service');
 const { buildNewBookingHostEmail } = require('./bookings.templates');
 const { sendNotification } = require('../notifications/notifications.service');
 const { NOTIFICATION_TYPES } = require('../notifications/notifications.validation');
@@ -41,8 +42,20 @@ function hasConfiguredPrice(value) {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+function isPrimaryBookingCategory(value) {
+  return (
+    value === LISTING_CATEGORIES.ACTIVITY ||
+    value === LISTING_CATEGORIES.PLACE ||
+    value === LISTING_CATEGORIES.EQUIPMENT
+  );
+}
+
 function resolveBookingType(payload, listing) {
-  const category = normalizeCategory(listing && listing.category);
+  const storedCategory = normalizeCategory(listing && listing.category);
+  const hintedCategory = normalizeCategory(payload && payload.listingType);
+  const category = isPrimaryBookingCategory(storedCategory)
+    ? storedCategory
+    : hintedCategory;
   const mode = String(payload.pricingMode || '').trim().toLowerCase();
   const price = (listing && listing.price) || {};
 
@@ -156,12 +169,6 @@ function validateBookingInputsForType(payload, listing, bookingType) {
       payload.numberOfGuests < 1
     ) {
       errors.numberOfGuests = 'Number of guests must be a positive integer.';
-    } else if (
-      listing.serviceDetails &&
-      listing.serviceDetails.maxParticipants &&
-      payload.numberOfGuests > listing.serviceDetails.maxParticipants
-    ) {
-      errors.numberOfGuests = `This activity allows at most ${listing.serviceDetails.maxParticipants} participants.`;
     }
     if (!payload.startTime) errors.startTime = 'Start time is required for activities.';
     if (!payload.endTime) errors.endTime = 'End time is required for activities.';
@@ -248,47 +255,6 @@ function calculateBookingPricing(payload, listing, bookingType) {
     totalAmount,
     currency: listing.price.currency,
   };
-}
-
-async function ensureSlotIsAvailable(payload) {
-  const conflictingBooking = await Booking.findOne({
-    listing: payload.listingId,
-    status: {
-      $in: [
-        BOOKING_STATUS.PENDING,
-        BOOKING_STATUS.AWAITING_HOST_APPROVAL,
-        BOOKING_STATUS.CONFIRMED,
-      ],
-    },
-    startDate: { $lte: payload.endDate },
-    endDate: { $gte: payload.startDate },
-  });
-
-  if (!conflictingBooking) {
-    return;
-  }
-
-  if (
-    payload.bookingType === BOOKING_TYPES.PER_HOUR ||
-    payload.bookingType === BOOKING_TYPES.HOURLY ||
-    payload.bookingType === BOOKING_TYPES.PER_PERSON
-  ) {
-    const requestedStart = timeStringToMinutes(payload.startTime);
-    const requestedEnd = timeStringToMinutes(payload.endTime);
-    const existingStart = conflictingBooking.startTime
-      ? timeStringToMinutes(conflictingBooking.startTime)
-      : 0;
-    const existingEnd = conflictingBooking.endTime
-      ? timeStringToMinutes(conflictingBooking.endTime)
-      : 24 * 60;
-
-    const overlaps = requestedStart < existingEnd && requestedEnd > existingStart;
-    if (!overlaps) {
-      return;
-    }
-  }
-
-  throw new ApiError(409, 'This listing is already booked for the selected period.');
 }
 
 function describeGuest(guest) {
@@ -408,8 +374,6 @@ async function createBooking(payload, userId) {
     );
   }
 
-  await ensureSlotIsAvailable(resolved);
-
   const numberOfGuests =
     bookingType === BOOKING_TYPES.PER_PERSON ? resolved.numberOfGuests : null;
 
@@ -498,8 +462,10 @@ async function getBookingsForGuest(userId, { page = 1, limit = 10 } = {}) {
     Booking.countDocuments(filter),
   ]);
 
+  const serializedBookings = bookings.map((booking) => booking.toJSON());
+
   return {
-    bookings: bookings.map((booking) => booking.toJSON()),
+    bookings: await attachReviewDataToBookings(serializedBookings, userId),
     pagination: buildPagination(total, page, limit),
   };
 }
@@ -542,7 +508,8 @@ async function getBookingByIdForUser(bookingId, userId) {
     throw new ApiError(403, 'You are not allowed to view this booking.');
   }
 
-  return booking.toJSON();
+  const [serializedBooking] = await attachReviewDataToBookings([booking.toJSON()], userId);
+  return serializedBooking;
 }
 
 async function cancelBooking(bookingId, userId) {

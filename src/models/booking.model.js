@@ -198,6 +198,13 @@ const bookingSchema = new mongoose.Schema(
     toJSON: {
       transform: (doc, returnedObject) => {
         returnedObject.id = returnedObject._id.toString();
+        if (returnedObject.createdAt) {
+          const bookedAt = new Date(returnedObject.createdAt);
+          if (!Number.isNaN(bookedAt.getTime())) {
+            returnedObject.bookedAt = bookedAt.toISOString();
+            returnedObject.bookedTime = bookedAt.toISOString().slice(11, 19);
+          }
+        }
         delete returnedObject._id;
         return returnedObject;
       },

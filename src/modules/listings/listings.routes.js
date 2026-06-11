@@ -7,25 +7,33 @@ const { upload, uploadImagesToSpacesHandler } = require('../../services/do-space
 
 const router = express.Router();
 
-router.use(authenticate);
-
 // Draft routes (host only) — must be before /:listingId to avoid conflict
-router.post('/draft', draftListingsController.saveDraftHandler);
-router.get('/draft', draftListingsController.getDraftHandler);
-router.delete('/draft', draftListingsController.discardDraftHandler);
-router.post('/images', upload.array('images', 10), uploadImagesToSpacesHandler);
-router.post('/images/spaces', upload.array('images', 10), uploadImagesToSpacesHandler);
+router.post('/draft', authenticate, draftListingsController.saveDraftHandler);
+router.get('/draft', authenticate, draftListingsController.getDraftHandler);
+router.delete('/draft', authenticate, draftListingsController.discardDraftHandler);
+router.post(
+  '/images',
+  authenticate,
+  upload.array('images', 10),
+  uploadImagesToSpacesHandler
+);
+router.post(
+  '/images/spaces',
+  authenticate,
+  upload.array('images', 10),
+  uploadImagesToSpacesHandler
+);
 
-// Browse all hosts' listings (any authenticated user)
+// Browse all hosts' listings (public)
 router.get('/browse', listingsController.browseListingsHandler);
 router.get('/browse/:listingId', listingsController.getPublicListingByIdHandler);
 
-// Both host and user can read listings
-router.get('/', listingsController.getMyListingsHandler);
-router.get('/:listingId', listingsController.getListingByIdHandler);
+// Host-owned listing management
+router.get('/', authenticate, listingsController.getMyListingsHandler);
+router.get('/:listingId', authenticate, listingsController.getListingByIdHandler);
 
-router.post('/', listingsController.createListingHandler);
-router.patch('/:listingId', listingsController.updateListingHandler);
-router.delete('/:listingId', listingsController.deleteListingHandler);
+router.post('/', authenticate, listingsController.createListingHandler);
+router.patch('/:listingId', authenticate, listingsController.updateListingHandler);
+router.delete('/:listingId', authenticate, listingsController.deleteListingHandler);
 
 module.exports = router;

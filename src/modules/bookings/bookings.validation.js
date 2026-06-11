@@ -43,6 +43,7 @@ function validateCreateBookingPayload(payload = {}) {
   const errors = {};
 
   const listingId = normalizeString(payload.listingId);
+  const listingType = normalizeString(payload.listingType).toLowerCase();
   const bookingType = normalizeString(payload.bookingType).toLowerCase();
   const pricingMode = normalizeString(payload.pricingMode).toLowerCase();
   const startDate = payload.startDate;
@@ -124,6 +125,7 @@ function validateCreateBookingPayload(payload = {}) {
 
   return {
     listingId,
+    listingType: listingType || null,
     bookingType: bookingType || null,
     pricingMode: pricingMode || null,
     startDate: start,
