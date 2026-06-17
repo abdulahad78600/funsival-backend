@@ -1,6 +1,10 @@
+const mongoose = require('mongoose');
+
 const Listing = require('../../models/listing.model');
 const User = require('../../models/user.model');
+const Booking = require('../../models/booking.model');
 const ApiError = require('../../utils/api-error');
+const { BOOKING_STATUS } = require('../../constants/booking');
 const { validateListingPayload } = require('./listings.validation');
 const {
   deleteLocalListingPhotos,
@@ -139,19 +143,88 @@ async function createListing(payload, userId) {
   return serializedListing;
 }
 
-async function getListingsForUser(userId, { page = 1, limit = 10 } = {}) {
+const LISTING_STATUS_FILTERS = ['all', 'active', 'inactive'];
+
+async function buildListingBookingCountMap(listingIds = []) {
+  if (!Array.isArray(listingIds) || listingIds.length === 0) {
+    return new Map();
+  }
+
+  const objectIds = listingIds
+    .map((id) => {
+      try {
+        return new mongoose.Types.ObjectId(String(id));
+      } catch (error) {
+        return null;
+      }
+    })
+    .filter(Boolean);
+
+  const rows = await Booking.aggregate([
+    {
+      $match: {
+        listing: { $in: objectIds },
+        status: { $in: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.COMPLETED] },
+      },
+    },
+    { $group: { _id: '$listing', count: { $sum: 1 } } },
+  ]);
+
+  const map = new Map();
+  rows.forEach((row) => {
+    map.set(String(row._id), row.count);
+  });
+  return map;
+}
+
+async function getListingsForUser(
+  userId,
+  { page = 1, limit = 10, status, search } = {}
+) {
   const skip = (page - 1) * limit;
   const filter = { createdBy: userId };
+
+  const normalizedStatus =
+    typeof status === 'string' ? status.trim().toLowerCase() : '';
+  if (normalizedStatus && normalizedStatus !== 'all') {
+    if (!LISTING_STATUS_FILTERS.includes(normalizedStatus)) {
+      throw new ApiError(
+        400,
+        `Invalid status. Allowed values: ${LISTING_STATUS_FILTERS.join(', ')}.`
+      );
+    }
+    filter.isActive = normalizedStatus === 'active';
+  }
+
+  const trimmedSearch = typeof search === 'string' ? search.trim() : '';
+  if (trimmedSearch) {
+    const regex = new RegExp(
+      trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+      'i'
+    );
+    filter['basicInformation.activityTitle'] = regex;
+  }
 
   const [listings, total] = await Promise.all([
     Listing.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
     Listing.countDocuments(filter),
   ]);
 
-  const serializedListings = listings.map((listing) => serializeListingRecord(listing.toJSON()));
+  const serializedListings = listings.map((listing) =>
+    serializeListingRecord(listing.toJSON())
+  );
+  const listingsWithReviews = await attachReviewSummariesToListings(serializedListings);
+
+  const listingIds = listingsWithReviews.map((listing) => listing.id).filter(Boolean);
+  const bookingCountMap = await buildListingBookingCountMap(listingIds);
+
+  const listingsWithCounts = listingsWithReviews.map((listing) => ({
+    ...listing,
+    bookingCount: bookingCountMap.get(String(listing.id)) || 0,
+  }));
 
   return {
-    listings: await attachReviewSummariesToListings(serializedListings),
+    listings: listingsWithCounts,
     pagination: {
       total,
       page,
@@ -161,6 +234,21 @@ async function getListingsForUser(userId, { page = 1, limit = 10 } = {}) {
       hasPrevPage: page > 1,
     },
   };
+}
+
+async function setListingActiveStatus(listingId, userId, isActive) {
+  const listing = await Listing.findOne({ _id: listingId, createdBy: userId });
+  if (!listing) {
+    throw new ApiError(404, 'Listing not found.');
+  }
+
+  listing.isActive = Boolean(isActive);
+  await listing.save();
+
+  const [serializedListing] = await attachReviewSummariesToListings([
+    serializeListingRecord(listing.toJSON()),
+  ]);
+  return serializedListing;
 }
 
 async function getListingForUser(listingId, userId) {
@@ -331,4 +419,6 @@ module.exports = {
   getListingById,
   updateListingForUser,
   deleteListingForUser,
+  setListingActiveStatus,
+  LISTING_STATUS_FILTERS,
 };

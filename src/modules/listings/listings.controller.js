@@ -10,6 +10,7 @@ const {
   getListingById,
   updateListingForUser,
   deleteListingForUser,
+  setListingActiveStatus,
 } = require('./listings.service');
 
 const uploadListingImagesHandler = asyncHandler(async (req, res) => {
@@ -44,13 +45,38 @@ const createListingHandler = asyncHandler(async (req, res) => {
 const getMyListingsHandler = asyncHandler(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+  const { status, search } = req.query;
 
-  const result = await getListingsForUser(req.user.id, { page, limit });
+  const result = await getListingsForUser(req.user.id, {
+    page,
+    limit,
+    status,
+    search,
+  });
 
   res.status(200).json({
     success: true,
     message: 'Listings fetched successfully.',
     data: result,
+  });
+});
+
+const setListingStatusHandler = asyncHandler(async (req, res) => {
+  const listingId = validateListingId(req.params.listingId);
+  if (typeof req.body?.isActive !== 'boolean') {
+    throw new ApiError(400, '`isActive` must be a boolean.');
+  }
+
+  const listing = await setListingActiveStatus(
+    listingId,
+    req.user.id,
+    req.body.isActive
+  );
+
+  res.status(200).json({
+    success: true,
+    message: `Listing ${listing.isActive ? 'activated' : 'deactivated'} successfully.`,
+    data: { listing },
   });
 });
 
@@ -137,4 +163,5 @@ module.exports = {
   getPublicListingByIdHandler,
   updateListingHandler,
   deleteListingHandler,
+  setListingStatusHandler,
 };

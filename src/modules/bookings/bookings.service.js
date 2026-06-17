@@ -1,3 +1,5 @@
+const mongoose = require('mongoose');
+
 const Booking = require('../../models/booking.model');
 const Listing = require('../../models/listing.model');
 const User = require('../../models/user.model');
@@ -462,6 +464,8 @@ async function getBookingsForGuest(userId, { page = 1, limit = 10 } = {}) {
     Booking.countDocuments(filter),
   ]);
 
+  await paymentsService.reconcileProcessingBookings(bookings);
+
   const serializedBookings = bookings.map((booking) => booking.toJSON());
 
   return {
@@ -470,9 +474,74 @@ async function getBookingsForGuest(userId, { page = 1, limit = 10 } = {}) {
   };
 }
 
-async function getBookingsForHost(hostId, { page = 1, limit = 10 } = {}) {
+const RESERVATION_TABS = ['active', 'upcoming', 'completed', 'cancelled'];
+
+function buildReservationStatusFilter(tab, now) {
+  switch (tab) {
+    case 'active':
+      return {
+        status: BOOKING_STATUS.CONFIRMED,
+        startDate: { $lte: now },
+        endDate: { $gte: now },
+      };
+    case 'upcoming':
+      return {
+        status: BOOKING_STATUS.CONFIRMED,
+        startDate: { $gt: now },
+      };
+    case 'completed':
+      return { status: BOOKING_STATUS.COMPLETED };
+    case 'cancelled':
+      return { status: { $in: [BOOKING_STATUS.CANCELLED, BOOKING_STATUS.DECLINED] } };
+    default:
+      return null;
+  }
+}
+
+function buildCreatedAtRange(date) {
+  if (!date) return null;
+  const parsed = new Date(date);
+  if (Number.isNaN(parsed.getTime())) return null;
+  const start = new Date(parsed);
+  start.setUTCHours(0, 0, 0, 0);
+  const end = new Date(start);
+  end.setUTCDate(end.getUTCDate() + 1);
+  return { $gte: start, $lt: end };
+}
+
+async function getBookingsForHost(
+  hostId,
+  { page = 1, limit = 10, tab, date, search } = {}
+) {
   const skip = (page - 1) * limit;
   const filter = { host: hostId };
+
+  const normalizedTab = typeof tab === 'string' ? tab.trim().toLowerCase() : '';
+  if (normalizedTab) {
+    if (!RESERVATION_TABS.includes(normalizedTab)) {
+      throw new ApiError(
+        400,
+        `Invalid tab. Allowed values: ${RESERVATION_TABS.join(', ')}.`
+      );
+    }
+    Object.assign(filter, buildReservationStatusFilter(normalizedTab, new Date()));
+  }
+
+  const createdAtRange = buildCreatedAtRange(date);
+  if (createdAtRange) {
+    filter.createdAt = createdAtRange;
+  }
+
+  const trimmedSearch = typeof search === 'string' ? search.trim() : '';
+  if (trimmedSearch) {
+    if (!mongoose.Types.ObjectId.isValid(trimmedSearch)) {
+      return {
+        bookings: [],
+        pagination: buildPagination(0, page, limit),
+      };
+    }
+    filter._id = new mongoose.Types.ObjectId(trimmedSearch);
+  }
 
   const [bookings, total] = await Promise.all([
     Booking.find(filter)
@@ -484,10 +553,40 @@ async function getBookingsForHost(hostId, { page = 1, limit = 10 } = {}) {
     Booking.countDocuments(filter),
   ]);
 
+  await paymentsService.reconcileProcessingBookings(bookings);
+
   return {
     bookings: bookings.map((booking) => booking.toJSON()),
     pagination: buildPagination(total, page, limit),
   };
+}
+
+async function getHostReservationStats(hostId) {
+  const now = new Date();
+  const baseFilter = { host: hostId };
+
+  const [upcoming, completed, cancelled, pending] = await Promise.all([
+    Booking.countDocuments({
+      ...baseFilter,
+      ...buildReservationStatusFilter('upcoming', now),
+    }),
+    Booking.countDocuments({
+      ...baseFilter,
+      ...buildReservationStatusFilter('completed', now),
+    }),
+    Booking.countDocuments({
+      ...baseFilter,
+      ...buildReservationStatusFilter('cancelled', now),
+    }),
+    Booking.countDocuments({
+      ...baseFilter,
+      status: {
+        $in: [BOOKING_STATUS.PENDING, BOOKING_STATUS.AWAITING_HOST_APPROVAL],
+      },
+    }),
+  ]);
+
+  return { upcoming, completed, cancelled, pending };
 }
 
 async function getBookingByIdForUser(bookingId, userId) {
@@ -507,6 +606,8 @@ async function getBookingByIdForUser(bookingId, userId) {
   if (!isParticipant) {
     throw new ApiError(403, 'You are not allowed to view this booking.');
   }
+
+  await paymentsService.reconcileProcessingBooking(booking);
 
   const [serializedBooking] = await attachReviewDataToBookings([booking.toJSON()], userId);
   return serializedBooking;
@@ -629,9 +730,11 @@ module.exports = {
   getBookingQuote,
   getBookingsForGuest,
   getBookingsForHost,
+  getHostReservationStats,
   getBookingByIdForUser,
   cancelBooking,
   acceptBookingRequest,
   declineBookingRequest,
   notifyHostOfBookingRequest,
+  RESERVATION_TABS,
 };

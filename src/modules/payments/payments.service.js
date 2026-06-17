@@ -262,8 +262,15 @@ async function authorizeBookingPayment(bookingId, guestUser, paymentMethodId) {
   booking.stripeAccountId = host.stripeConnect.accountId;
   booking.stripePaymentIntentId = paymentIntent.id;
   booking.applicationFeeAmount = fromStripeAmount(applicationFeeAmount, currency);
-  booking.paymentStatus = PAYMENT_STATUS.PROCESSING;
-  await booking.save();
+
+  // Stripe usually returns requires_capture synchronously for non-3DS cards.
+  // Promote inline so the booking isn't stuck in PROCESSING waiting on the webhook.
+  if (paymentIntent.status === 'requires_capture') {
+    await markBookingAuthorized(booking, paymentIntent);
+  } else {
+    booking.paymentStatus = PAYMENT_STATUS.PROCESSING;
+    await booking.save();
+  }
 
   const { successUrl } = resolveCheckoutUrls(booking._id);
 
@@ -386,6 +393,58 @@ async function markBookingAuthorized(booking, paymentIntent) {
   return booking;
 }
 
+// Wait a few seconds after authorize before hitting Stripe again — gives the
+// inline `requires_capture` write a chance to land without an extra API call.
+const PROCESSING_RECONCILE_GRACE_MS = 10 * 1000;
+
+async function reconcileProcessingBooking(booking) {
+  if (!booking || booking.paymentStatus !== PAYMENT_STATUS.PROCESSING) {
+    return booking;
+  }
+  if (!booking.stripePaymentIntentId) {
+    return booking;
+  }
+  const updatedAt = booking.updatedAt ? new Date(booking.updatedAt).getTime() : 0;
+  if (updatedAt && Date.now() - updatedAt < PROCESSING_RECONCILE_GRACE_MS) {
+    return booking;
+  }
+
+  try {
+    const latest = await stripe.paymentIntents.retrieve(booking.stripePaymentIntentId);
+    if (latest.status === 'requires_capture') {
+      await markBookingAuthorized(booking, latest);
+    } else if (latest.status === 'succeeded') {
+      await markBookingPaid(booking, latest);
+    } else if (latest.status === 'canceled') {
+      booking.paymentStatus = PAYMENT_STATUS.AUTH_RELEASED;
+      if (
+        booking.status !== BOOKING_STATUS.DECLINED &&
+        booking.status !== BOOKING_STATUS.CANCELLED
+      ) {
+        booking.status = BOOKING_STATUS.CANCELLED;
+        booking.cancelledAt = booking.cancelledAt || new Date();
+      }
+      await booking.save();
+    }
+  } catch (error) {
+    console.error(
+      `Failed to reconcile processing booking ${booking._id}:`,
+      error.message || error
+    );
+  }
+  return booking;
+}
+
+async function reconcileProcessingBookings(bookings) {
+  if (!Array.isArray(bookings) || bookings.length === 0) return bookings;
+  await Promise.all(
+    bookings
+      .filter((b) => b && b.paymentStatus === PAYMENT_STATUS.PROCESSING)
+      .map((b) => reconcileProcessingBooking(b))
+  );
+  return bookings;
+}
+
 async function capturePaymentForBooking(bookingId, hostUserId) {
   const booking = await Booking.findById(bookingId);
   if (!booking) {
@@ -394,14 +453,44 @@ async function capturePaymentForBooking(bookingId, hostUserId) {
   if (booking.host.toString() !== hostUserId.toString()) {
     throw new ApiError(403, 'You are not allowed to accept this booking.');
   }
+  if (!booking.stripePaymentIntentId || !booking.stripeAccountId) {
+    throw new ApiError(400, 'Booking is missing Stripe payment information.');
+  }
+
+  // Reconcile a stuck PROCESSING booking against Stripe before failing.
+  // The amount_capturable_updated webhook may not have arrived yet even though
+  // the card is already authorized at Stripe.
+  if (booking.paymentStatus === PAYMENT_STATUS.PROCESSING) {
+    const latest = await stripe.paymentIntents.retrieve(booking.stripePaymentIntentId);
+    if (latest.status === 'requires_capture') {
+      await markBookingAuthorized(booking, latest);
+    } else if (latest.status === 'requires_action') {
+      throw new ApiError(
+        400,
+        'The guest still needs to complete card verification (3D Secure) before this booking can be accepted.'
+      );
+    } else if (latest.status === 'processing') {
+      throw new ApiError(
+        400,
+        'The card is still being authorized by the bank. Please try again in a moment.'
+      );
+    } else if (latest.status === 'canceled') {
+      booking.paymentStatus = PAYMENT_STATUS.AUTH_RELEASED;
+      await booking.save();
+      throw new ApiError(400, 'The card authorization was canceled. The guest needs to book again.');
+    } else {
+      throw new ApiError(
+        400,
+        `Card authorization is not complete (Stripe status: ${latest.status}).`
+      );
+    }
+  }
+
   if (booking.paymentStatus !== PAYMENT_STATUS.AUTHORIZED) {
     throw new ApiError(
       400,
       `Only authorized bookings can be captured. Current state: ${booking.paymentStatus}.`
     );
-  }
-  if (!booking.stripePaymentIntentId || !booking.stripeAccountId) {
-    throw new ApiError(400, 'Booking is missing Stripe payment information.');
   }
   if (booking.authExpiresAt && booking.authExpiresAt.getTime() <= Date.now()) {
     throw new ApiError(
@@ -659,6 +748,8 @@ module.exports = {
   createLoginLink,
   authorizeBookingPayment,
   capturePaymentForBooking,
+  reconcileProcessingBooking,
+  reconcileProcessingBookings,
   cancelAuthorizationForBooking,
   refundBooking,
   executeStripeRefund,

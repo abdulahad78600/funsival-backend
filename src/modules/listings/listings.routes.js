@@ -34,6 +34,11 @@ router.get('/:listingId', authenticate, listingsController.getListingByIdHandler
 
 router.post('/', authenticate, listingsController.createListingHandler);
 router.patch('/:listingId', authenticate, listingsController.updateListingHandler);
+router.patch(
+  '/:listingId/status',
+  authenticate,
+  listingsController.setListingStatusHandler
+);
 router.delete('/:listingId', authenticate, listingsController.deleteListingHandler);
 
 module.exports = router;

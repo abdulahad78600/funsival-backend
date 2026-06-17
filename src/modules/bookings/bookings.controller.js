@@ -8,6 +8,7 @@ const {
   getBookingQuote,
   getBookingsForGuest,
   getBookingsForHost,
+  getHostReservationStats,
   getBookingByIdForUser,
   cancelBooking,
   acceptBookingRequest,
@@ -55,12 +56,28 @@ const getMyBookingsHandler = asyncHandler(async (req, res) => {
 
 const getHostBookingsHandler = asyncHandler(async (req, res) => {
   const pagination = parsePaginationQuery(req.query);
-  const result = await getBookingsForHost(req.user.id, pagination);
+  const { tab, date, search } = req.query;
+  const result = await getBookingsForHost(req.user.id, {
+    ...pagination,
+    tab,
+    date,
+    search,
+  });
 
   res.status(200).json({
     success: true,
     message: 'Host bookings fetched successfully.',
     data: result,
+  });
+});
+
+const getHostReservationStatsHandler = asyncHandler(async (req, res) => {
+  const stats = await getHostReservationStats(req.user.id);
+
+  res.status(200).json({
+    success: true,
+    message: 'Reservation stats fetched successfully.',
+    data: stats,
   });
 });
 
@@ -115,6 +132,7 @@ module.exports = {
   getBookingQuoteHandler,
   getMyBookingsHandler,
   getHostBookingsHandler,
+  getHostReservationStatsHandler,
   getBookingByIdHandler,
   cancelBookingHandler,
   acceptBookingHandler,

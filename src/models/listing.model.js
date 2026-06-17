@@ -248,6 +248,11 @@ const listingSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
+    isActive: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
   },
   {
     timestamps: true,
