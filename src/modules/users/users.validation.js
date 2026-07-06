@@ -8,12 +8,14 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-function validateOptionalString(value, fieldName, { maxLength = 255 } = {}) {
+function validateOptionalString(value, fieldName, { maxLength = 255, allowEmpty = false } = {}) {
   if (value === undefined) return undefined;
 
   const normalizedValue = normalizeString(value);
 
   if (!normalizedValue) {
+    if (allowEmpty) return '';
+
     throw new ApiError(400, 'Validation failed.', {
       [fieldName]: `${fieldName} cannot be empty.`,
     });
@@ -92,6 +94,7 @@ function validateProviderProfilePayload(payload = {}) {
   });
   const addressLine2 = validateOptionalString(payload.addressLine2, 'addressLine2', {
     maxLength: 255,
+    allowEmpty: true,
   });
   const city = validateOptionalString(payload.city, 'city', { maxLength: 100 });
   const state = validateOptionalString(payload.state, 'state', { maxLength: 100 });
@@ -140,6 +143,7 @@ function validateUserProfilePayload(payload = {}) {
   });
   const addressLine2 = validateOptionalString(payload.addressLine2, 'addressLine2', {
     maxLength: 255,
+    allowEmpty: true,
   });
   const city = validateOptionalString(payload.city, 'city', { maxLength: 100 });
   const state = validateOptionalString(payload.state, 'state', { maxLength: 100 });
