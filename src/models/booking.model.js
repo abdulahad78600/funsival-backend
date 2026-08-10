@@ -4,9 +4,25 @@ const {
   AVAILABLE_BOOKING_TYPES,
   AVAILABLE_BOOKING_STATUSES,
   AVAILABLE_PAYMENT_STATUSES,
+  AVAILABLE_PAYMENT_FLOWS,
   BOOKING_STATUS,
+  PAYMENT_FLOW,
   PAYMENT_STATUS,
 } = require('../constants/booking');
+
+const bookingSlotSchema = new mongoose.Schema(
+  {
+    startTime: {
+      type: String,
+      required: true,
+    },
+    endTime: {
+      type: String,
+      required: true,
+    },
+  },
+  { _id: false }
+);
 
 const bookingSchema = new mongoose.Schema(
   {
@@ -48,6 +64,12 @@ const bookingSchema = new mongoose.Schema(
     endTime: {
       type: String,
       default: null,
+    },
+    // Individual time slots for multi-slot hourly bookings. Empty for
+    // single-span hourly, daily, and per-person bookings.
+    slots: {
+      type: [bookingSlotSchema],
+      default: [],
     },
     numberOfGuests: {
       type: Number,
@@ -95,6 +117,14 @@ const bookingSchema = new mongoose.Schema(
       type: String,
       enum: AVAILABLE_PAYMENT_STATUSES,
       default: PAYMENT_STATUS.REQUIRES_PAYMENT,
+    },
+    paymentFlow: {
+      type: String,
+      enum: AVAILABLE_PAYMENT_FLOWS,
+      // Preserve existing destination-charge bookings and only release
+      // bookings explicitly created with the new platform-hold flow.
+      default: PAYMENT_FLOW.DESTINATION_CHARGE,
+      index: true,
     },
     cancelledAt: {
       type: Date,
@@ -152,6 +182,11 @@ const bookingSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    stripeTransferId: {
+      type: String,
+      default: null,
+      index: true,
+    },
     stripeRefundId: {
       type: String,
       default: null,
@@ -165,11 +200,21 @@ const bookingSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    merchantAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     paidAt: {
       type: Date,
       default: null,
     },
     payoutEligibleAt: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    releasedAt: {
       type: Date,
       default: null,
     },
@@ -213,6 +258,7 @@ const bookingSchema = new mongoose.Schema(
 );
 
 bookingSchema.index({ listing: 1, startDate: 1, endDate: 1 });
+bookingSchema.index({ paymentFlow: 1, paymentStatus: 1, payoutEligibleAt: 1 });
 
 const Booking = mongoose.model('Booking', bookingSchema);
 

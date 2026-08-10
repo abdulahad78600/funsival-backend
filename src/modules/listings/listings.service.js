@@ -4,7 +4,7 @@ const Listing = require('../../models/listing.model');
 const User = require('../../models/user.model');
 const Booking = require('../../models/booking.model');
 const ApiError = require('../../utils/api-error');
-const { BOOKING_STATUS } = require('../../constants/booking');
+const { BOOKING_STATUS, BOOKING_TYPES } = require('../../constants/booking');
 const { validateListingPayload } = require('./listings.validation');
 const {
   deleteLocalListingPhotos,
@@ -378,6 +378,148 @@ async function getListingById(listingId) {
   return serializedListing;
 }
 
+const DEFAULT_SLOT_DURATION_MINUTES = 60;
+const MIN_SLOT_DURATION_MINUTES = 15;
+const MAX_SLOT_DURATION_MINUTES = 12 * 60;
+
+function timeStringToMinutes(time) {
+  const [hours, minutes] = String(time).split(':').map(Number);
+  return hours * 60 + minutes;
+}
+
+function minutesToTimeString(totalMinutes) {
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+function startOfUtcDay(date) {
+  const result = new Date(date);
+  result.setUTCHours(0, 0, 0, 0);
+  return result;
+}
+
+function resolveSlotDurationMinutes(listing) {
+  const duration = listing.serviceDetails && listing.serviceDetails.duration;
+  if (duration && Number.isFinite(duration.value)) {
+    let minutes = null;
+    if (duration.unit === 'minutes') minutes = duration.value;
+    if (duration.unit === 'hours') minutes = duration.value * 60;
+    if (minutes) {
+      return Math.max(
+        MIN_SLOT_DURATION_MINUTES,
+        Math.min(minutes, MAX_SLOT_DURATION_MINUTES)
+      );
+    }
+  }
+  return DEFAULT_SLOT_DURATION_MINUTES;
+}
+
+async function getBookedIntervalsForDate(listingId, dayStart) {
+  const dayEnd = new Date(dayStart);
+  dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
+
+  const activeBookings = await Booking.find({
+    listing: listingId,
+    status: {
+      $in: [
+        BOOKING_STATUS.PENDING,
+        BOOKING_STATUS.AWAITING_HOST_APPROVAL,
+        BOOKING_STATUS.CONFIRMED,
+      ],
+    },
+    bookingType: { $in: [BOOKING_TYPES.HOURLY, BOOKING_TYPES.PER_HOUR] },
+    startDate: { $lt: dayEnd },
+    endDate: { $gte: dayStart },
+  }).select('startTime endTime slots');
+
+  return activeBookings.flatMap((booking) => {
+    const slots =
+      Array.isArray(booking.slots) && booking.slots.length > 0
+        ? booking.slots
+        : [{ startTime: booking.startTime, endTime: booking.endTime }];
+    return slots
+      .filter((slot) => slot.startTime && slot.endTime)
+      .map((slot) => ({
+        start: timeStringToMinutes(slot.startTime),
+        end: timeStringToMinutes(slot.endTime),
+      }));
+  });
+}
+
+async function getAvailableSlotsForListing(listingId, dateInput) {
+  const requestedDate = new Date(dateInput);
+  if (!dateInput || Number.isNaN(requestedDate.getTime())) {
+    throw new ApiError(400, 'A valid `date` query parameter is required (YYYY-MM-DD).');
+  }
+
+  const listing = await Listing.findById(listingId);
+  if (!listing) {
+    throw new ApiError(404, 'Listing not found.');
+  }
+
+  const dayStart = startOfUtcDay(requestedDate);
+  const windows = (listing.availability || []).filter(
+    (entry) =>
+      entry.isAvailable !== false &&
+      entry.date &&
+      startOfUtcDay(entry.date).getTime() === dayStart.getTime()
+  );
+
+  const slotDurationMinutes = resolveSlotDurationMinutes(listing);
+  const hourlyPrice =
+    listing.price && Number.isFinite(listing.price.hourly)
+      ? listing.price.hourly
+      : null;
+  const pricePerSlot =
+    hourlyPrice !== null
+      ? Number(((hourlyPrice * slotDurationMinutes) / 60).toFixed(2))
+      : null;
+
+  const bookedIntervals =
+    windows.length > 0
+      ? await getBookedIntervalsForDate(listing._id, dayStart)
+      : [];
+
+  const slots = [];
+  for (const window of windows) {
+    const windowStart = timeStringToMinutes(window.startTime);
+    const windowEnd = timeStringToMinutes(window.endTime);
+
+    for (
+      let slotStart = windowStart;
+      slotStart + slotDurationMinutes <= windowEnd;
+      slotStart += slotDurationMinutes
+    ) {
+      const slotEnd = slotStart + slotDurationMinutes;
+      const isBooked = bookedIntervals.some(
+        (booked) => slotStart < booked.end && booked.start < slotEnd
+      );
+
+      slots.push({
+        startTime: minutesToTimeString(slotStart),
+        endTime: minutesToTimeString(slotEnd),
+        durationMinutes: slotDurationMinutes,
+        price: pricePerSlot,
+        available: !isBooked,
+      });
+    }
+  }
+
+  slots.sort(
+    (a, b) => timeStringToMinutes(a.startTime) - timeStringToMinutes(b.startTime)
+  );
+
+  return {
+    listingId: listing._id.toString(),
+    date: dayStart.toISOString().slice(0, 10),
+    slotDurationMinutes,
+    hourlyPrice,
+    currency: (listing.price && listing.price.currency) || 'USD',
+    slots,
+  };
+}
+
 async function updateListingForUser(listingId, payload, userId) {
   const existingListing = await Listing.findOne({ _id: listingId, createdBy: userId });
 
@@ -417,6 +559,7 @@ module.exports = {
   getListingForUser,
   browseListings,
   getListingById,
+  getAvailableSlotsForListing,
   updateListingForUser,
   deleteListingForUser,
   setListingActiveStatus,

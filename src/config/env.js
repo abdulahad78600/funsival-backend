@@ -10,6 +10,23 @@ function normalizeSecret(value) {
   return typeof value === 'string' ? value.replace(/\s+/g, '') : '';
 }
 
+function normalizeNumber(
+  value,
+  fallback,
+  { min = -Infinity, max = Infinity, integer = false } = {}
+) {
+  const parsed = Number(value);
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < min ||
+    parsed > max ||
+    (integer && !Number.isInteger(parsed))
+  ) {
+    return fallback;
+  }
+  return parsed;
+}
+
 const requiredEnvironmentVariables = ['MONGODB_URI', 'JWT_SECRET', 'BREVO_API_KEY'];
 const missingEnvironmentVariables = requiredEnvironmentVariables.filter(
   (variableName) => !process.env[variableName]
@@ -54,8 +71,16 @@ module.exports = {
     publishableKey: normalizeString(process.env.STRIPE_PUBLISHABLE_KEY),
     webhookSecret: normalizeSecret(process.env.STRIPE_WEBHOOK_SECRET),
     connectWebhookSecret: normalizeSecret(process.env.STRIPE_CONNECT_WEBHOOK_SECRET),
-    applicationFeePercent: Number(process.env.STRIPE_APPLICATION_FEE_PERCENT) || 10,
-    payoutDelayDays: Number(process.env.STRIPE_PAYOUT_DELAY_DAYS) || 7,
+    applicationFeePercent: normalizeNumber(
+      process.env.STRIPE_APPLICATION_FEE_PERCENT,
+      10,
+      { min: 0, max: 100 }
+    ),
+    payoutDelayDays: normalizeNumber(process.env.STRIPE_PAYOUT_DELAY_DAYS, 7, {
+      min: 0,
+      max: 365,
+      integer: true,
+    }),
     connectCountry: normalizeString(process.env.STRIPE_CONNECT_COUNTRY) || 'US',
     checkoutSuccessUrl:
       normalizeString(process.env.STRIPE_CHECKOUT_SUCCESS_URL) ||

@@ -27,8 +27,15 @@ async function dispatchEvent(event) {
     case 'charge.dispute.funds_withdrawn':
       await paymentsService.handleChargeDispute(event.data.object);
       return;
+    case 'payout.created':
     case 'payout.paid':
-      await paymentsService.handlePayoutPaid(event.data.object);
+    case 'payout.failed':
+    case 'payout.canceled':
+    case 'payout.updated':
+      await paymentsService.syncWithdrawalFromPayout(
+        event.data.object,
+        event.account || null
+      );
       return;
     case 'account.updated':
       await paymentsService.syncConnectedAccountFromEvent(event.data.object);

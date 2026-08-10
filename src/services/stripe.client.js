@@ -6,7 +6,7 @@ if (!env.stripe.secretKey) {
 }
 
 const stripe = new Stripe(env.stripe.secretKey, {
-  apiVersion: '2024-12-18.acacia',
+  apiVersion: '2026-05-27.dahlia',
   appInfo: {
     name: 'Funsival',
     version: '1.0.0',

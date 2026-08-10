@@ -4,6 +4,7 @@ const User = require('../../models/user.model');
 const ApiError = require('../../utils/api-error');
 const {
   PAYMENT_STATUS,
+  PAYMENT_FLOW,
   REFUND_REQUEST_STATUS,
 } = require('../../constants/booking');
 const { USER_ROLES } = require('../../constants/roles');
@@ -14,6 +15,68 @@ const { NOTIFICATION_TYPES } = require('../notifications/notifications.validatio
 function isHoldWindowOpen(booking) {
   return Boolean(
     booking.payoutEligibleAt && booking.payoutEligibleAt.getTime() > Date.now()
+  );
+}
+
+const DECISION_RETRY_DELAY_MS = 10 * 60 * 1000;
+
+async function claimRefundDecision(refundRequestId, action, adminUserId, note) {
+  const now = new Date();
+  const staleCutoff = new Date(now.getTime() - DECISION_RETRY_DELAY_MS);
+  const refundRequest = await RefundRequest.findOneAndUpdate(
+    {
+      _id: refundRequestId,
+      $or: [
+        { status: REFUND_REQUEST_STATUS.PENDING },
+        {
+          status: REFUND_REQUEST_STATUS.PROCESSING,
+          processingAction: action,
+          processingAt: { $lte: staleCutoff },
+        },
+      ],
+    },
+    {
+      $set: {
+        status: REFUND_REQUEST_STATUS.PROCESSING,
+        processingAction: action,
+        processingAt: now,
+        decidedBy: adminUserId,
+        decisionNote: note || null,
+      },
+    },
+    { new: true }
+  );
+
+  if (refundRequest) return refundRequest;
+
+  const existing = await RefundRequest.findById(refundRequestId).select(
+    'status processingAction'
+  );
+  if (!existing) {
+    throw new ApiError(404, 'Refund request not found.');
+  }
+  if (existing.status === REFUND_REQUEST_STATUS.PROCESSING) {
+    throw new ApiError(409, 'This refund request is already being processed.');
+  }
+  throw new ApiError(400, `This refund request has already been ${existing.status}.`);
+}
+
+async function resetRefundDecisionClaim(refundRequestId, action) {
+  await RefundRequest.updateOne(
+    {
+      _id: refundRequestId,
+      status: REFUND_REQUEST_STATUS.PROCESSING,
+      processingAction: action,
+    },
+    {
+      $set: {
+        status: REFUND_REQUEST_STATUS.PENDING,
+        processingAction: null,
+        processingAt: null,
+        decidedBy: null,
+        decisionNote: null,
+      },
+    }
   );
 }
 
@@ -60,21 +123,31 @@ async function createRefundRequest(bookingId, guestId, { reason }) {
 
   const existing = await RefundRequest.findOne({
     booking: booking._id,
-    status: REFUND_REQUEST_STATUS.PENDING,
+    status: {
+      $in: [REFUND_REQUEST_STATUS.PENDING, REFUND_REQUEST_STATUS.PROCESSING],
+    },
   });
   if (existing) {
     throw new ApiError(409, 'A refund request for this booking is already pending review.');
   }
 
-  const refundRequest = await RefundRequest.create({
-    booking: booking._id,
-    requestedBy: guestId,
-    host: booking.host,
-    amount: booking.totalAmount,
-    currency: booking.currency,
-    reason,
-    payoutEligibleAt: booking.payoutEligibleAt,
-  });
+  let refundRequest;
+  try {
+    refundRequest = await RefundRequest.create({
+      booking: booking._id,
+      requestedBy: guestId,
+      host: booking.host,
+      amount: booking.totalAmount,
+      currency: booking.currency,
+      reason,
+      payoutEligibleAt: booking.payoutEligibleAt,
+    });
+  } catch (error) {
+    if (error && error.code === 11000) {
+      throw new ApiError(409, 'A refund request for this booking is already under review.');
+    }
+    throw error;
+  }
 
   booking.activeRefundRequest = refundRequest._id;
   await booking.save();
@@ -120,6 +193,21 @@ async function withdrawRefundRequest(bookingId, guestId) {
     { _id: bookingId, activeRefundRequest: refundRequest._id },
     { $set: { activeRefundRequest: null } }
   );
+
+  const booking = await Booking.findById(bookingId).select(
+    'paymentFlow paymentStatus payoutEligibleAt'
+  );
+  if (
+    booking &&
+    booking.paymentFlow === PAYMENT_FLOW.PLATFORM_HOLD &&
+    booking.paymentStatus === PAYMENT_STATUS.HELD &&
+    booking.payoutEligibleAt &&
+    booking.payoutEligibleAt.getTime() <= Date.now()
+  ) {
+    await paymentsService.releaseBookingFunds(bookingId).catch((error) =>
+      console.error('Failed to release funds after refund request withdrawal.', error)
+    );
+  }
 
   return refundRequest.toJSON();
 }
@@ -168,28 +256,37 @@ async function getRefundRequestForAdmin(refundRequestId) {
 }
 
 async function approveRefundRequest(refundRequestId, adminUserId, { note } = {}) {
-  const refundRequest = await RefundRequest.findById(refundRequestId);
-  if (!refundRequest) {
-    throw new ApiError(404, 'Refund request not found.');
-  }
-  if (refundRequest.status !== REFUND_REQUEST_STATUS.PENDING) {
-    throw new ApiError(
-      400,
-      `This refund request has already been ${refundRequest.status}.`
-    );
-  }
+  const refundRequest = await claimRefundDecision(
+    refundRequestId,
+    'approve',
+    adminUserId,
+    note
+  );
 
   const booking = await Booking.findById(refundRequest.booking);
   if (!booking) {
+    await resetRefundDecisionClaim(refundRequest._id, 'approve');
     throw new ApiError(404, 'Associated booking not found.');
   }
 
-  if (!isHoldWindowOpen(booking)) {
+  const alreadyRefunded =
+    booking.paymentStatus === PAYMENT_STATUS.REFUNDED && Boolean(booking.stripeRefundId);
+  const protectedPlatformHold =
+    alreadyRefunded ||
+    (booking.paymentFlow === PAYMENT_FLOW.PLATFORM_HOLD &&
+      [PAYMENT_STATUS.HELD, PAYMENT_STATUS.REFUNDING].includes(
+        booking.paymentStatus
+      ) &&
+      !booking.stripeTransferId);
+
+  if (!isHoldWindowOpen(booking) && !protectedPlatformHold) {
     refundRequest.status = REFUND_REQUEST_STATUS.EXPIRED;
     refundRequest.decidedBy = adminUserId;
     refundRequest.decidedAt = new Date();
     refundRequest.decisionNote =
       'Hold window expired before approval — funds have been released.';
+    refundRequest.processingAction = null;
+    refundRequest.processingAt = null;
     await refundRequest.save();
     await Booking.updateOne(
       { _id: booking._id, activeRefundRequest: refundRequest._id },
@@ -197,21 +294,35 @@ async function approveRefundRequest(refundRequestId, adminUserId, { note } = {})
     );
     throw new ApiError(
       400,
-      'The 7-day hold window has passed. Funds have already been released to the provider and can no longer be refunded automatically.'
+      'The 7-day hold window has passed and funds have already been released to the provider.'
     );
   }
 
-  const { refund } = await paymentsService.executeStripeRefund(
-    booking,
-    adminUserId,
-    'requested_by_customer'
-  );
+  let refund;
+  if (alreadyRefunded) {
+    // Recover cleanly if Stripe and the booking were updated but the refund
+    // request write was interrupted.
+    refund = { id: booking.stripeRefundId };
+  } else {
+    try {
+      ({ refund } = await paymentsService.executeStripeRefund(
+        booking,
+        adminUserId,
+        'requested_by_customer'
+      ));
+    } catch (error) {
+      await resetRefundDecisionClaim(refundRequest._id, 'approve');
+      throw error;
+    }
+  }
 
   refundRequest.status = REFUND_REQUEST_STATUS.APPROVED;
   refundRequest.decidedBy = adminUserId;
   refundRequest.decidedAt = new Date();
   refundRequest.decisionNote = note || null;
   refundRequest.stripeRefundId = refund.id;
+  refundRequest.processingAction = null;
+  refundRequest.processingAt = null;
   await refundRequest.save();
 
   await Booking.updateOne(
@@ -243,27 +354,40 @@ async function approveRefundRequest(refundRequestId, adminUserId, { note } = {})
 }
 
 async function rejectRefundRequest(refundRequestId, adminUserId, { note } = {}) {
-  const refundRequest = await RefundRequest.findById(refundRequestId);
-  if (!refundRequest) {
-    throw new ApiError(404, 'Refund request not found.');
-  }
-  if (refundRequest.status !== REFUND_REQUEST_STATUS.PENDING) {
-    throw new ApiError(
-      400,
-      `This refund request has already been ${refundRequest.status}.`
-    );
-  }
+  const refundRequest = await claimRefundDecision(
+    refundRequestId,
+    'reject',
+    adminUserId,
+    note
+  );
 
   refundRequest.status = REFUND_REQUEST_STATUS.REJECTED;
   refundRequest.decidedBy = adminUserId;
   refundRequest.decidedAt = new Date();
   refundRequest.decisionNote = note || null;
+  refundRequest.processingAction = null;
+  refundRequest.processingAt = null;
   await refundRequest.save();
 
   await Booking.updateOne(
     { _id: refundRequest.booking, activeRefundRequest: refundRequest._id },
     { $set: { activeRefundRequest: null } }
   );
+
+  const booking = await Booking.findById(refundRequest.booking).select(
+    'paymentFlow paymentStatus payoutEligibleAt'
+  );
+  if (
+    booking &&
+    booking.paymentFlow === PAYMENT_FLOW.PLATFORM_HOLD &&
+    booking.paymentStatus === PAYMENT_STATUS.HELD &&
+    booking.payoutEligibleAt &&
+    booking.payoutEligibleAt.getTime() <= Date.now()
+  ) {
+    await paymentsService.releaseBookingFunds(booking._id).catch((error) =>
+      console.error('Failed to release funds after refund rejection.', error)
+    );
+  }
 
   sendNotification(refundRequest.requestedBy, {
     type: NOTIFICATION_TYPES.REFUND_REJECTED,

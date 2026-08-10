@@ -71,6 +71,10 @@ const stripeConnectSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    transfersEnabled: {
+      type: Boolean,
+      default: false,
+    },
     payoutsEnabled: {
       type: Boolean,
       default: false,

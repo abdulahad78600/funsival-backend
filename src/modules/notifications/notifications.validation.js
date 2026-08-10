@@ -14,6 +14,8 @@ const NOTIFICATION_TYPES = Object.freeze({
   REFUND_REQUESTED: 'refund_requested',
   REFUND_APPROVED: 'refund_approved',
   REFUND_REJECTED: 'refund_rejected',
+  WITHDRAWAL_PAID: 'withdrawal_paid',
+  WITHDRAWAL_FAILED: 'withdrawal_failed',
 });
 
 const AVAILABLE_NOTIFICATION_TYPES = Object.values(NOTIFICATION_TYPES);

@@ -26,6 +26,10 @@ router.post(
 
 // Browse all hosts' listings (public)
 router.get('/browse', listingsController.browseListingsHandler);
+router.get(
+  '/browse/:listingId/slots',
+  listingsController.getListingSlotsHandler
+);
 router.get('/browse/:listingId', listingsController.getPublicListingByIdHandler);
 
 // Host-owned listing management

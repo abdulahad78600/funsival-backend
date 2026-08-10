@@ -2,6 +2,10 @@ const mongoose = require('mongoose');
 const asyncHandler = require('../../utils/async-handler');
 const ApiError = require('../../utils/api-error');
 const paymentsService = require('./payments.service');
+const {
+  validateWithdrawalPayload,
+  validatePaginationQuery,
+} = require('./payments.validation');
 
 function validateBookingId(bookingId) {
   if (!bookingId || !mongoose.Types.ObjectId.isValid(bookingId)) {
@@ -34,6 +38,35 @@ const createLoginLinkHandler = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Stripe login link created.',
+    data: result,
+  });
+});
+
+const getMerchantBalanceHandler = asyncHandler(async (req, res) => {
+  const balance = await paymentsService.getMerchantBalance(req.user._id);
+  res.status(200).json({
+    success: true,
+    message: 'Merchant balance fetched.',
+    data: balance,
+  });
+});
+
+const createWithdrawalHandler = asyncHandler(async (req, res) => {
+  const payload = validateWithdrawalPayload(req.body, req.headers['idempotency-key']);
+  const withdrawal = await paymentsService.createWithdrawal(req.user._id, payload);
+  res.status(200).json({
+    success: true,
+    message: 'Withdrawal submitted.',
+    data: { withdrawal },
+  });
+});
+
+const listWithdrawalsHandler = asyncHandler(async (req, res) => {
+  const query = validatePaginationQuery(req.query);
+  const result = await paymentsService.listWithdrawals(req.user._id, query);
+  res.status(200).json({
+    success: true,
+    message: 'Withdrawals fetched.',
     data: result,
   });
 });
@@ -71,6 +104,9 @@ module.exports = {
   startOnboardingHandler,
   getConnectStatusHandler,
   createLoginLinkHandler,
+  getMerchantBalanceHandler,
+  createWithdrawalHandler,
+  listWithdrawalsHandler,
   authorizeBookingPaymentHandler,
   refundBookingHandler,
 };

@@ -8,6 +8,7 @@ const {
   getListingForUser,
   browseListings,
   getListingById,
+  getAvailableSlotsForListing,
   updateListingForUser,
   deleteListingForUser,
   setListingActiveStatus,
@@ -131,6 +132,17 @@ const getPublicListingByIdHandler = asyncHandler(async (req, res) => {
   });
 });
 
+const getListingSlotsHandler = asyncHandler(async (req, res) => {
+  const listingId = validateListingId(req.params.listingId);
+  const result = await getAvailableSlotsForListing(listingId, req.query.date);
+
+  res.status(200).json({
+    success: true,
+    message: 'Listing slots fetched successfully.',
+    data: result,
+  });
+});
+
 const updateListingHandler = asyncHandler(async (req, res) => {
   const listingId = validateListingId(req.params.listingId);
   const listing = await updateListingForUser(listingId, req.body, req.user.id);
@@ -161,6 +173,7 @@ module.exports = {
   getListingByIdHandler,
   browseListingsHandler,
   getPublicListingByIdHandler,
+  getListingSlotsHandler,
   updateListingHandler,
   deleteListingHandler,
   setListingStatusHandler,

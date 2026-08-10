@@ -66,6 +66,15 @@ const refundRequestSchema = new mongoose.Schema(
       trim: true,
       maxlength: 2000,
     },
+    processingAction: {
+      type: String,
+      enum: ['approve', 'reject', null],
+      default: null,
+    },
+    processingAt: {
+      type: Date,
+      default: null,
+    },
     stripeRefundId: {
       type: String,
       default: null,

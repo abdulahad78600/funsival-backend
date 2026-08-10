@@ -39,6 +39,61 @@ function validateBookingId(bookingId) {
 
 const AVAILABLE_PRICING_MODES = ['hourly', 'daily'];
 
+const MAX_SLOTS_PER_BOOKING = 48;
+
+function timeToMinutes(time) {
+  const [hours, minutes] = time.split(':').map(Number);
+  return hours * 60 + minutes;
+}
+
+function validateSlots(rawSlots, errors) {
+  if (rawSlots === undefined || rawSlots === null) {
+    return null;
+  }
+
+  if (!Array.isArray(rawSlots) || rawSlots.length === 0) {
+    errors.slots = 'Slots must be a non-empty array of { startTime, endTime }.';
+    return null;
+  }
+
+  if (rawSlots.length > MAX_SLOTS_PER_BOOKING) {
+    errors.slots = `A booking can include at most ${MAX_SLOTS_PER_BOOKING} slots.`;
+    return null;
+  }
+
+  const parsed = [];
+  for (let index = 0; index < rawSlots.length; index += 1) {
+    const slot = rawSlots[index] || {};
+    const startTime = normalizeString(slot.startTime);
+    const endTime = normalizeString(slot.endTime);
+
+    if (!isValidTime(startTime) || !isValidTime(endTime)) {
+      errors.slots = `Slot ${index + 1} must have startTime and endTime in HH:mm format.`;
+      return null;
+    }
+    if (timeToMinutes(endTime) <= timeToMinutes(startTime)) {
+      errors.slots = `Slot ${index + 1} must end after it starts.`;
+      return null;
+    }
+
+    parsed.push({ startTime, endTime });
+  }
+
+  parsed.sort((a, b) => timeToMinutes(a.startTime) - timeToMinutes(b.startTime));
+
+  for (let index = 1; index < parsed.length; index += 1) {
+    if (
+      timeToMinutes(parsed[index].startTime) <
+      timeToMinutes(parsed[index - 1].endTime)
+    ) {
+      errors.slots = 'Selected slots overlap each other.';
+      return null;
+    }
+  }
+
+  return parsed;
+}
+
 function validateCreateBookingPayload(payload = {}) {
   const errors = {};
 
@@ -55,6 +110,7 @@ function validateCreateBookingPayload(payload = {}) {
   const durationDays = payload.durationDays;
   const includeDelivery = Boolean(payload.includeDelivery);
   const paymentMethodId = normalizeString(payload.paymentMethodId);
+  const slots = validateSlots(payload.slots, errors);
 
   if (!listingId) {
     errors.listingId = 'Listing ID is required.';
@@ -138,6 +194,7 @@ function validateCreateBookingPayload(payload = {}) {
       durationHours !== undefined && durationHours !== null ? durationHours : null,
     durationDays:
       durationDays !== undefined && durationDays !== null ? durationDays : null,
+    slots,
     includeDelivery,
     paymentMethodId,
   };

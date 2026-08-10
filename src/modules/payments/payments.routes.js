@@ -27,6 +27,27 @@ router.post(
   paymentsController.createLoginLinkHandler
 );
 
+router.get(
+  '/connect/balance',
+  authenticate,
+  authorizeRoles(USER_ROLES.HOST),
+  paymentsController.getMerchantBalanceHandler
+);
+
+router.get(
+  '/connect/withdrawals',
+  authenticate,
+  authorizeRoles(USER_ROLES.HOST),
+  paymentsController.listWithdrawalsHandler
+);
+
+router.post(
+  '/connect/withdrawals',
+  authenticate,
+  authorizeRoles(USER_ROLES.HOST),
+  paymentsController.createWithdrawalHandler
+);
+
 router.post(
   '/bookings/:bookingId/pay',
   authenticate,

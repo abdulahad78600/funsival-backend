@@ -4,6 +4,7 @@ const app = require('./app');
 const config = require('./config/env');
 const connectDatabase = require('./config/database');
 const { startBookingAuthExpiryJob } = require('./jobs/booking-auth-expiry');
+const { startBookingPayoutReleaseJob } = require('./jobs/booking-payout-release');
 
 let server;
 
@@ -16,6 +17,7 @@ async function startServer() {
     });
 
     startBookingAuthExpiryJob();
+    startBookingPayoutReleaseJob();
   } catch (error) {
     console.error('Failed to start the server.');
     console.error(error.message);

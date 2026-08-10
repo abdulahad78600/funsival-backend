@@ -34,6 +34,16 @@ function calculateHoursBetween(startTime, endTime) {
   return minutes / 60;
 }
 
+function bookingHasSlots(payload) {
+  return Array.isArray(payload.slots) && payload.slots.length > 0;
+}
+
+function isHourlyBookingType(bookingType) {
+  return (
+    bookingType === BOOKING_TYPES.HOURLY || bookingType === BOOKING_TYPES.PER_HOUR
+  );
+}
+
 function calculateDaysBetween(startDate, endDate) {
   const millisecondsPerDay = 1000 * 60 * 60 * 24;
   const days = Math.ceil((endDate - startDate) / millisecondsPerDay);
@@ -139,7 +149,12 @@ function expandBookingTimes(payload, bookingType) {
     if (!expanded.endDate) {
       expanded.endDate = expanded.startDate;
     }
-    if (expanded.startTime && expanded.durationHours && !expanded.endTime) {
+    if (bookingHasSlots(expanded)) {
+      // Slots are already sorted and non-overlapping (payload validation).
+      // The overall window spans from the first slot to the last one.
+      expanded.startTime = expanded.slots[0].startTime;
+      expanded.endTime = expanded.slots[expanded.slots.length - 1].endTime;
+    } else if (expanded.startTime && expanded.durationHours && !expanded.endTime) {
       expanded.endTime = addHoursToTime(expanded.startTime, expanded.durationHours);
     }
   } else if (bookingType === BOOKING_TYPES.DAILY) {
@@ -178,14 +193,17 @@ function validateBookingInputsForType(payload, listing, bookingType) {
     bookingType === BOOKING_TYPES.HOURLY ||
     bookingType === BOOKING_TYPES.PER_HOUR
   ) {
-    if (!payload.startTime) {
-      errors.startTime = 'Start time is required for hourly bookings.';
-    }
-    const hasDuration =
-      payload.durationHours !== undefined && payload.durationHours !== null;
-    if (!hasDuration && !payload.endTime) {
-      errors.durationHours =
-        'durationHours is required (or provide endTime explicitly).';
+    if (!bookingHasSlots(payload)) {
+      if (!payload.startTime) {
+        errors.startTime =
+          'Start time is required for hourly bookings (or provide slots).';
+      }
+      const hasDuration =
+        payload.durationHours !== undefined && payload.durationHours !== null;
+      if (!hasDuration && !payload.endTime) {
+        errors.durationHours =
+          'durationHours is required (or provide endTime or slots).';
+      }
     }
   } else if (bookingType === BOOKING_TYPES.DAILY) {
     const hasDurationDays =
@@ -194,6 +212,10 @@ function validateBookingInputsForType(payload, listing, bookingType) {
       errors.durationDays =
         'durationDays is required (or provide endDate explicitly).';
     }
+  }
+
+  if (bookingHasSlots(payload) && !isHourlyBookingType(bookingType)) {
+    errors.slots = 'Multiple time slots are only supported for hourly bookings.';
   }
 
   if (Object.keys(errors).length > 0) {
@@ -213,7 +235,13 @@ function calculateBookingPricing(payload, listing, bookingType) {
     case BOOKING_TYPES.PER_HOUR:
     case BOOKING_TYPES.HOURLY:
       pricePerUnit = listing.price.hourly;
-      unitsBooked = calculateHoursBetween(payload.startTime, payload.endTime);
+      unitsBooked = bookingHasSlots(payload)
+        ? payload.slots.reduce(
+            (total, slot) =>
+              total + calculateHoursBetween(slot.startTime, slot.endTime),
+            0
+          )
+        : calculateHoursBetween(payload.startTime, payload.endTime);
       if (unitsBooked < 0.5) {
         throw new ApiError(400, 'Minimum booking duration is 30 minutes.');
       }
@@ -311,6 +339,122 @@ async function notifyHostOfBookingRequest(bookingId) {
   }).catch((error) => console.error('Failed to send booking-request push notification.', error));
 }
 
+function startOfUtcDay(date) {
+  const result = new Date(date);
+  result.setUTCHours(0, 0, 0, 0);
+  return result;
+}
+
+function getRequestedIntervals(resolved) {
+  const slots = bookingHasSlots(resolved)
+    ? resolved.slots
+    : [{ startTime: resolved.startTime, endTime: resolved.endTime }];
+
+  return slots
+    .filter((slot) => slot.startTime && slot.endTime)
+    .map((slot) => ({
+      startTime: slot.startTime,
+      endTime: slot.endTime,
+      start: timeStringToMinutes(slot.startTime),
+      end: timeStringToMinutes(slot.endTime),
+    }));
+}
+
+function intervalsOverlap(aStart, aEnd, bStart, bEnd) {
+  return aStart < bEnd && bStart < aEnd;
+}
+
+function ensureSlotsWithinListingAvailability(listing, resolved, requested) {
+  const dayStart = startOfUtcDay(resolved.startDate).getTime();
+
+  const windows = (listing.availability || []).filter(
+    (entry) =>
+      entry.isAvailable !== false &&
+      entry.date &&
+      startOfUtcDay(entry.date).getTime() === dayStart
+  );
+
+  if (windows.length === 0) {
+    throw new ApiError(400, 'This listing is not available on the selected date.');
+  }
+
+  const outside = requested.filter(
+    (slot) =>
+      !windows.some(
+        (window) =>
+          slot.start >= timeStringToMinutes(window.startTime) &&
+          slot.end <= timeStringToMinutes(window.endTime)
+      )
+  );
+
+  if (outside.length > 0) {
+    throw new ApiError(400, 'Some selected slots are outside the listing availability.', {
+      slots: outside.map(({ startTime, endTime }) => ({ startTime, endTime })),
+    });
+  }
+}
+
+async function ensureHourlySlotsNotBooked(listing, resolved, requested) {
+  const dayStart = startOfUtcDay(resolved.startDate);
+  const dayEnd = new Date(dayStart);
+  dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
+
+  const activeBookings = await Booking.find({
+    listing: listing._id,
+    status: {
+      $in: [
+        BOOKING_STATUS.PENDING,
+        BOOKING_STATUS.AWAITING_HOST_APPROVAL,
+        BOOKING_STATUS.CONFIRMED,
+      ],
+    },
+    bookingType: { $in: [BOOKING_TYPES.HOURLY, BOOKING_TYPES.PER_HOUR] },
+    startDate: { $lt: dayEnd },
+    endDate: { $gte: dayStart },
+  }).select('startTime endTime slots');
+
+  const bookedIntervals = activeBookings.flatMap((booking) => {
+    const slots =
+      Array.isArray(booking.slots) && booking.slots.length > 0
+        ? booking.slots
+        : [{ startTime: booking.startTime, endTime: booking.endTime }];
+    return slots
+      .filter((slot) => slot.startTime && slot.endTime)
+      .map((slot) => ({
+        start: timeStringToMinutes(slot.startTime),
+        end: timeStringToMinutes(slot.endTime),
+      }));
+  });
+
+  const conflicting = requested.filter((slot) =>
+    bookedIntervals.some((booked) =>
+      intervalsOverlap(slot.start, slot.end, booked.start, booked.end)
+    )
+  );
+
+  if (conflicting.length > 0) {
+    throw new ApiError(409, 'One or more selected time slots are no longer available.', {
+      slots: conflicting.map(({ startTime, endTime }) => ({ startTime, endTime })),
+    });
+  }
+}
+
+async function ensureHourlyBookingIsAvailable(listing, resolved, bookingType) {
+  if (!isHourlyBookingType(bookingType)) return;
+
+  const requested = getRequestedIntervals(resolved);
+  if (requested.length === 0) return;
+
+  // Only slot-based bookings are validated against the published availability
+  // windows — legacy single-span clients never sent slots and may book times
+  // the host has not listed, which we keep working as before.
+  if (bookingHasSlots(resolved)) {
+    ensureSlotsWithinListingAvailability(listing, resolved, requested);
+  }
+
+  await ensureHourlySlotsNotBooked(listing, resolved, requested);
+}
+
 async function buildBookingQuote(payload, userId) {
   const listing = await Listing.findById(payload.listingId);
   if (!listing) {
@@ -330,6 +474,7 @@ async function buildBookingQuote(payload, userId) {
 
   validateBookingInputsForType(payload, listing, bookingType);
   const resolved = expandBookingTimes(payload, bookingType);
+  await ensureHourlyBookingIsAvailable(listing, resolved, bookingType);
   const pricing = calculateBookingPricing(resolved, listing, bookingType);
 
   return {
@@ -352,6 +497,7 @@ async function getBookingQuote(payload, userId) {
     endDate: resolved.endDate,
     startTime: resolved.startTime,
     endTime: resolved.endTime,
+    slots: bookingHasSlots(resolved) ? resolved.slots : null,
     numberOfGuests: resolved.numberOfGuests || null,
     durationHours: resolved.durationHours || null,
     durationDays: resolved.durationDays || null,
@@ -369,10 +515,10 @@ async function createBooking(payload, userId) {
       'This provider has not connected a payment account yet. Booking is unavailable.'
     );
   }
-  if (!host.stripeConnect.chargesEnabled) {
+  if (!host.stripeConnect.transfersEnabled) {
     throw new ApiError(
       400,
-      'This provider has not finished payment onboarding. Booking is unavailable.'
+      'This provider has not finished payout onboarding. Booking is unavailable.'
     );
   }
 
@@ -388,6 +534,7 @@ async function createBooking(payload, userId) {
     endDate: resolved.endDate,
     startTime: resolved.startTime,
     endTime: resolved.endTime,
+    slots: bookingHasSlots(resolved) ? resolved.slots : [],
     numberOfGuests,
     pricePerUnit: pricing.pricePerUnit,
     unitsBooked: pricing.unitsBooked,

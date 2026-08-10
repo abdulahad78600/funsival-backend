@@ -2,12 +2,16 @@ const stripe = require('../../services/stripe.client');
 const env = require('../../config/env');
 const User = require('../../models/user.model');
 const Booking = require('../../models/booking.model');
-const Listing = require('../../models/listing.model');
+const Withdrawal = require('../../models/withdrawal.model');
+const RefundRequest = require('../../models/refund-request.model');
 const ApiError = require('../../utils/api-error');
 const {
   BOOKING_STATUS,
   PAYMENT_STATUS,
+  PAYMENT_FLOW,
   HOST_APPROVAL_WINDOW_DAYS,
+  WITHDRAWAL_STATUS,
+  REFUND_REQUEST_STATUS,
 } = require('../../constants/booking');
 const { sendNotification } = require('../notifications/notifications.service');
 const { NOTIFICATION_TYPES } = require('../notifications/notifications.validation');
@@ -16,6 +20,7 @@ const ZERO_DECIMAL_CURRENCIES = new Set([
   'BIF', 'CLP', 'DJF', 'GNF', 'JPY', 'KMF', 'KRW', 'MGA', 'PYG', 'RWF',
   'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF',
 ]);
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
 
 function toStripeAmount(amount, currency) {
   const upper = (currency || 'USD').toUpperCase();
@@ -34,9 +39,33 @@ function fromStripeAmount(amount, currency) {
 }
 
 function calculateApplicationFee(totalAmount, currency) {
-  const percent = env.stripe.applicationFeePercent / 100;
+  const configuredPercent = Number(env.stripe.applicationFeePercent);
+  const percent = Math.min(
+    100,
+    Math.max(0, Number.isFinite(configuredPercent) ? configuredPercent : 10)
+  ) / 100;
   const fee = Number(totalAmount) * percent;
   return toStripeAmount(fee, currency);
+}
+
+function calculatePaymentSplit(totalAmount, currency) {
+  const total = toStripeAmount(totalAmount, currency);
+  const applicationFee = Math.min(total, calculateApplicationFee(totalAmount, currency));
+  return {
+    total,
+    applicationFee,
+    merchant: Math.max(0, total - applicationFee),
+  };
+}
+
+function calculatePayoutEligibleAt(paidAt, delayDays = env.stripe.payoutDelayDays) {
+  const paidAtDate = paidAt instanceof Date ? paidAt : new Date(paidAt);
+  return new Date(paidAtDate.getTime() + delayDays * DAY_IN_MS);
+}
+
+function isPayoutEligible(payoutEligibleAt, now = new Date()) {
+  if (!payoutEligibleAt) return false;
+  return new Date(payoutEligibleAt).getTime() <= new Date(now).getTime();
 }
 
 function resolveOnboardingReturnUrl(userId) {
@@ -74,9 +103,10 @@ async function getOrCreateConnectedAccount(user, country) {
     business_type: 'individual',
     settings: {
       payouts: {
+        // Manual payouts: released held funds stay in the connected account's
+        // Stripe balance until the provider withdraws their current balance.
         schedule: {
-          interval: 'daily',
-          delay_days: env.stripe.payoutDelayDays,
+          interval: 'manual',
         },
       },
     },
@@ -89,12 +119,31 @@ async function getOrCreateConnectedAccount(user, country) {
     ...(user.stripeConnect ? user.stripeConnect.toObject() : {}),
     accountId: account.id,
     chargesEnabled: Boolean(account.charges_enabled),
+    transfersEnabled: account.capabilities && account.capabilities.transfers === 'active',
     payoutsEnabled: Boolean(account.payouts_enabled),
     detailsSubmitted: Boolean(account.details_submitted),
   };
   await user.save();
 
   return account.id;
+}
+
+async function ensureManualPayoutSchedule(accountId, retrievedAccount = null) {
+  const account = retrievedAccount || (await stripe.accounts.retrieve(accountId));
+  const payoutSchedule =
+    account.settings && account.settings.payouts && account.settings.payouts.schedule;
+
+  if (payoutSchedule && payoutSchedule.interval === 'manual') {
+    return account;
+  }
+
+  return stripe.accounts.update(accountId, {
+    settings: {
+      payouts: {
+        schedule: { interval: 'manual' },
+      },
+    },
+  });
 }
 
 async function createOnboardingLink(userId, { country } = {}) {
@@ -114,6 +163,7 @@ async function createOnboardingLink(userId, { country } = {}) {
   }
 
   const accountId = await getOrCreateConnectedAccount(user, country);
+  await ensureManualPayoutSchedule(accountId);
   const returnUrl = resolveOnboardingReturnUrl(userId);
 
   const link = await stripe.accountLinks.create({
@@ -141,14 +191,21 @@ async function getConnectAccountStatus(userId) {
     return {
       hasAccount: false,
       chargesEnabled: false,
+      transfersEnabled: false,
       payoutsEnabled: false,
       detailsSubmitted: false,
     };
   }
 
-  const account = await stripe.accounts.retrieve(user.stripeConnect.accountId);
+  const retrievedAccount = await stripe.accounts.retrieve(user.stripeConnect.accountId);
+  const account = await ensureManualPayoutSchedule(
+    user.stripeConnect.accountId,
+    retrievedAccount
+  );
 
   user.stripeConnect.chargesEnabled = Boolean(account.charges_enabled);
+  user.stripeConnect.transfersEnabled =
+    account.capabilities && account.capabilities.transfers === 'active';
   user.stripeConnect.payoutsEnabled = Boolean(account.payouts_enabled);
   user.stripeConnect.detailsSubmitted = Boolean(account.details_submitted);
   user.stripeConnect.disabledReason =
@@ -162,6 +219,8 @@ async function getConnectAccountStatus(userId) {
     hasAccount: true,
     accountId: account.id,
     chargesEnabled: Boolean(account.charges_enabled),
+    transfersEnabled:
+      account.capabilities && account.capabilities.transfers === 'active',
     payoutsEnabled: Boolean(account.payouts_enabled),
     detailsSubmitted: Boolean(account.details_submitted),
     disabledReason: user.stripeConnect.disabledReason,
@@ -193,9 +252,8 @@ async function authorizeBookingPayment(bookingId, guestUser, paymentMethodId) {
   }
 
   if (
-    booking.paymentStatus === PAYMENT_STATUS.HELD ||
-    booking.paymentStatus === PAYMENT_STATUS.AUTHORIZED ||
-    booking.paymentStatus === PAYMENT_STATUS.RELEASED
+    booking.paymentStatus !== PAYMENT_STATUS.REQUIRES_PAYMENT &&
+    booking.paymentStatus !== PAYMENT_STATUS.FAILED
   ) {
     throw new ApiError(400, 'Booking is already paid or authorized.');
   }
@@ -214,8 +272,8 @@ async function authorizeBookingPayment(bookingId, guestUser, paymentMethodId) {
   if (!host || !host.stripeConnect || !host.stripeConnect.accountId) {
     throw new ApiError(400, 'Host has not connected a payment account.');
   }
-  if (!host.stripeConnect.chargesEnabled) {
-    throw new ApiError(400, 'Host payout account is not yet ready to accept payments.');
+  if (!host.stripeConnect.transfersEnabled) {
+    throw new ApiError(400, 'Host payout account is not yet ready to receive transfers.');
   }
   if (!freshGuest) {
     throw new ApiError(404, 'Guest account not found.');
@@ -232,26 +290,27 @@ async function authorizeBookingPayment(bookingId, guestUser, paymentMethodId) {
   }
 
   const currency = (booking.currency || 'USD').toLowerCase();
-  const applicationFeeAmount = calculateApplicationFee(booking.totalAmount, currency);
+  const split = calculatePaymentSplit(booking.totalAmount, currency);
 
   const paymentIntent = await stripe.paymentIntents.create(
     {
-      amount: toStripeAmount(booking.totalAmount, currency),
+      amount: split.total,
       currency,
       customer: customerId,
       payment_method: paymentMethodId,
-      payment_method_types: ['card'],
       capture_method: 'manual',
       confirm: true,
       off_session: false,
       setup_future_usage: 'off_session',
-      application_fee_amount: applicationFeeAmount,
-      transfer_data: { destination: host.stripeConnect.accountId },
+      transfer_group: `booking_${booking._id}`,
       description: `Funsival Booking #${booking._id}`,
       metadata: {
         bookingId: String(booking._id),
         guestId: String(freshGuest._id),
         hostId: String(host._id),
+        paymentFlow: PAYMENT_FLOW.PLATFORM_HOLD,
+        applicationFeeAmount: String(split.applicationFee),
+        merchantAmount: String(split.merchant),
       },
     },
     {
@@ -261,7 +320,9 @@ async function authorizeBookingPayment(bookingId, guestUser, paymentMethodId) {
 
   booking.stripeAccountId = host.stripeConnect.accountId;
   booking.stripePaymentIntentId = paymentIntent.id;
-  booking.applicationFeeAmount = fromStripeAmount(applicationFeeAmount, currency);
+  booking.paymentFlow = PAYMENT_FLOW.PLATFORM_HOLD;
+  booking.applicationFeeAmount = fromStripeAmount(split.applicationFee, currency);
+  booking.merchantAmount = fromStripeAmount(split.merchant, currency);
 
   // Stripe usually returns requires_capture synchronously for non-3DS cards.
   // Promote inline so the booking isn't stuck in PROCESSING waiting on the webhook.
@@ -296,15 +357,40 @@ async function authorizeBookingPayment(bookingId, guestUser, paymentMethodId) {
   };
 }
 
+function applyPaymentFlowMetadata(booking, paymentIntent) {
+  const metadata = (paymentIntent && paymentIntent.metadata) || {};
+  if (metadata.paymentFlow !== PAYMENT_FLOW.PLATFORM_HOLD) return;
+
+  booking.paymentFlow = PAYMENT_FLOW.PLATFORM_HOLD;
+  const currency = booking.currency || paymentIntent.currency || 'USD';
+  const applicationFee = Number(metadata.applicationFeeAmount);
+  const merchantAmount = Number(metadata.merchantAmount);
+
+  if (Number.isInteger(applicationFee) && applicationFee >= 0) {
+    booking.applicationFeeAmount = fromStripeAmount(applicationFee, currency);
+  }
+  if (Number.isInteger(merchantAmount) && merchantAmount >= 0) {
+    booking.merchantAmount = fromStripeAmount(merchantAmount, currency);
+  }
+}
+
 async function markBookingPaid(booking, paymentIntent) {
-  if (booking.paymentStatus === PAYMENT_STATUS.HELD) {
+  if (
+    booking.paymentStatus === PAYMENT_STATUS.HELD ||
+    booking.paymentStatus === PAYMENT_STATUS.REFUNDING ||
+    booking.paymentStatus === PAYMENT_STATUS.RELEASING ||
+    booking.paymentStatus === PAYMENT_STATUS.RELEASED ||
+    booking.paymentStatus === PAYMENT_STATUS.REFUNDED ||
+    booking.paymentStatus === PAYMENT_STATUS.DISPUTED
+  ) {
     return booking;
   }
 
-  const payoutEligibleAt = new Date();
-  payoutEligibleAt.setUTCDate(payoutEligibleAt.getUTCDate() + env.stripe.payoutDelayDays);
+  const paidAt = new Date();
+  const payoutEligibleAt = calculatePayoutEligibleAt(paidAt);
 
   booking.paymentStatus = PAYMENT_STATUS.HELD;
+  applyPaymentFlowMetadata(booking, paymentIntent);
   booking.status = BOOKING_STATUS.CONFIRMED;
   booking.stripePaymentIntentId = paymentIntent.id;
   if (paymentIntent.latest_charge) {
@@ -313,7 +399,7 @@ async function markBookingPaid(booking, paymentIntent) {
         ? paymentIntent.latest_charge
         : paymentIntent.latest_charge.id;
   }
-  booking.paidAt = new Date();
+  booking.paidAt = paidAt;
   booking.acceptedAt = booking.acceptedAt || new Date();
   booking.payoutEligibleAt = payoutEligibleAt;
   await booking.save();
@@ -349,9 +435,13 @@ async function markBookingAuthorized(booking, paymentIntent) {
     return booking;
   }
   if (
+    booking.paymentStatus === PAYMENT_STATUS.AUTH_RELEASED ||
     booking.paymentStatus === PAYMENT_STATUS.HELD ||
+    booking.paymentStatus === PAYMENT_STATUS.REFUNDING ||
+    booking.paymentStatus === PAYMENT_STATUS.RELEASING ||
     booking.paymentStatus === PAYMENT_STATUS.RELEASED ||
-    booking.paymentStatus === PAYMENT_STATUS.REFUNDED
+    booking.paymentStatus === PAYMENT_STATUS.REFUNDED ||
+    booking.paymentStatus === PAYMENT_STATUS.DISPUTED
   ) {
     return booking;
   }
@@ -360,6 +450,7 @@ async function markBookingAuthorized(booking, paymentIntent) {
   authExpiresAt.setUTCDate(authExpiresAt.getUTCDate() + HOST_APPROVAL_WINDOW_DAYS);
 
   booking.paymentStatus = PAYMENT_STATUS.AUTHORIZED;
+  applyPaymentFlowMetadata(booking, paymentIntent);
   booking.status = BOOKING_STATUS.AWAITING_HOST_APPROVAL;
   booking.stripePaymentIntentId = paymentIntent.id;
   if (paymentIntent.latest_charge) {
@@ -547,6 +638,20 @@ async function cancelAuthorizationForBooking(bookingId, actorUserId, reason) {
 }
 
 async function executeStripeRefund(booking, adminUserId, reason) {
+  if (
+    booking.paymentStatus === PAYMENT_STATUS.REFUNDING &&
+    booking.updatedAt &&
+    new Date(booking.updatedAt).getTime() <= Date.now() - 10 * 60 * 1000
+  ) {
+    const reset = await Booking.updateOne(
+      { _id: booking._id, paymentStatus: PAYMENT_STATUS.REFUNDING },
+      { $set: { paymentStatus: PAYMENT_STATUS.HELD } }
+    );
+    if (reset.modifiedCount === 1) {
+      booking.paymentStatus = PAYMENT_STATUS.HELD;
+    }
+  }
+
   if (booking.paymentStatus !== PAYMENT_STATUS.HELD) {
     throw new ApiError(
       400,
@@ -558,37 +663,79 @@ async function executeStripeRefund(booking, adminUserId, reason) {
     throw new ApiError(400, 'Booking is missing Stripe payment information.');
   }
 
-  if (booking.payoutEligibleAt && booking.payoutEligibleAt.getTime() <= Date.now()) {
+  const isPlatformHold = booking.paymentFlow === PAYMENT_FLOW.PLATFORM_HOLD;
+  if (isPlatformHold && booking.stripeTransferId) {
     throw new ApiError(
       400,
-      'The payout hold window has passed. Funds have already been released to the provider.'
+      'Funds have already been transferred to the provider and cannot be refunded through the hold flow.'
     );
   }
 
-  const refund = await stripe.refunds.create({
-    payment_intent: booking.stripePaymentIntentId,
-    refund_application_fee: true,
-    reverse_transfer: true,
+  if (
+    !isPlatformHold &&
+    booking.payoutEligibleAt &&
+    booking.payoutEligibleAt.getTime() <= Date.now()
+  ) {
+    throw new ApiError(
+      400,
+      'The legacy payout hold window has passed. Funds have already been released to the provider.'
+    );
+  }
+
+  const claimedBooking = await Booking.findOneAndUpdate(
+    { _id: booking._id, paymentStatus: PAYMENT_STATUS.HELD },
+    { $set: { paymentStatus: PAYMENT_STATUS.REFUNDING } },
+    { new: true }
+  );
+  if (!claimedBooking) {
+    throw new ApiError(
+      409,
+      'This booking is already being refunded or released. Refresh and try again.'
+    );
+  }
+
+  const refundParams = {
+    payment_intent: claimedBooking.stripePaymentIntentId,
     reason: reason && ['duplicate', 'fraudulent', 'requested_by_customer'].includes(reason)
       ? reason
       : 'requested_by_customer',
     metadata: {
-      bookingId: String(booking._id),
+      bookingId: String(claimedBooking._id),
       adminId: String(adminUserId),
     },
-  });
+  };
 
-  booking.paymentStatus = PAYMENT_STATUS.REFUNDED;
-  booking.status = BOOKING_STATUS.CANCELLED;
-  booking.stripeRefundId = refund.id;
-  booking.refundedAt = new Date();
-  booking.refundedBy = adminUserId;
-  booking.refundReason = reason || null;
-  booking.cancelledAt = new Date();
-  booking.cancelledBy = adminUserId;
-  await booking.save();
+  // Destination-charge bookings already moved the merchant amount at capture,
+  // so those legacy refunds must reverse the transfer and application fee.
+  if (!isPlatformHold) {
+    refundParams.refund_application_fee = true;
+    refundParams.reverse_transfer = true;
+  }
 
-  return { booking, refund };
+  try {
+    const refund = await stripe.refunds.create(refundParams, {
+      idempotencyKey: `booking_${claimedBooking._id}_full_refund_v1`,
+    });
+
+    claimedBooking.paymentStatus = PAYMENT_STATUS.REFUNDED;
+    claimedBooking.status = BOOKING_STATUS.CANCELLED;
+    claimedBooking.stripeRefundId = refund.id;
+    claimedBooking.refundedAt = new Date();
+    claimedBooking.refundedBy = adminUserId;
+    claimedBooking.refundReason = reason || null;
+    claimedBooking.activeRefundRequest = null;
+    claimedBooking.cancelledAt = new Date();
+    claimedBooking.cancelledBy = adminUserId;
+    await claimedBooking.save();
+
+    return { booking: claimedBooking, refund };
+  } catch (error) {
+    await Booking.updateOne(
+      { _id: claimedBooking._id, paymentStatus: PAYMENT_STATUS.REFUNDING },
+      { $set: { paymentStatus: PAYMENT_STATUS.HELD } }
+    );
+    throw error;
+  }
 }
 
 async function refundBooking(bookingId, adminUserId, reason) {
@@ -597,23 +744,496 @@ async function refundBooking(bookingId, adminUserId, reason) {
     throw new ApiError(404, 'Booking not found.');
   }
 
-  await executeStripeRefund(booking, adminUserId, reason);
+  const { booking: refundedBooking } = await executeStripeRefund(
+    booking,
+    adminUserId,
+    reason
+  );
 
-  sendNotification(booking.bookedBy, {
+  await RefundRequest.updateMany(
+    {
+      booking: refundedBooking._id,
+      status: {
+        $in: [REFUND_REQUEST_STATUS.PENDING, REFUND_REQUEST_STATUS.PROCESSING],
+      },
+    },
+    {
+      $set: {
+        status: REFUND_REQUEST_STATUS.APPROVED,
+        decidedBy: adminUserId,
+        decidedAt: new Date(),
+        decisionNote: reason || null,
+        stripeRefundId: refundedBooking.stripeRefundId,
+        processingAction: null,
+        processingAt: null,
+      },
+    }
+  );
+
+  sendNotification(refundedBooking.bookedBy, {
     type: NOTIFICATION_TYPES.BOOKING_CANCELLED,
     title: 'Your booking has been refunded',
     body: 'A refund has been issued for your booking. It may take 5-10 days to appear on your card.',
-    data: { bookingId: booking._id.toString() },
+    data: { bookingId: refundedBooking._id.toString() },
   }).catch((error) => console.error('Failed to notify guest of refund.', error));
 
-  sendNotification(booking.host, {
+  sendNotification(refundedBooking.host, {
     type: NOTIFICATION_TYPES.BOOKING_CANCELLED,
     title: 'Booking refunded by admin',
     body: 'A booking on your listing has been refunded by Funsival support.',
-    data: { bookingId: booking._id.toString() },
+    data: { bookingId: refundedBooking._id.toString() },
   }).catch((error) => console.error('Failed to notify host of refund.', error));
 
-  return booking.toJSON();
+  return refundedBooking.toJSON();
+}
+
+async function getHostConnectAccount(userId, { requirePayouts = false } = {}) {
+  const user = await User.findById(userId).select('+stripeConnect');
+  if (!user || !user.stripeConnect || !user.stripeConnect.accountId) {
+    throw new ApiError(400, 'Provider has not connected a Stripe account.');
+  }
+  if (requirePayouts && !user.stripeConnect.payoutsEnabled) {
+    throw new ApiError(400, 'Provider bank payouts are not enabled yet.');
+  }
+
+  await ensureManualPayoutSchedule(user.stripeConnect.accountId);
+  return { user, accountId: user.stripeConnect.accountId };
+}
+
+function addMinorAmount(target, currency, field, amount) {
+  const normalizedCurrency = (currency || 'USD').toUpperCase();
+  if (!target.has(normalizedCurrency)) {
+    target.set(normalizedCurrency, {
+      currency: normalizedCurrency,
+      held: 0,
+      stripePending: 0,
+      pending: 0,
+      current: 0,
+    });
+  }
+  target.get(normalizedCurrency)[field] += Number(amount) || 0;
+}
+
+async function getMerchantBalance(userId) {
+  const { accountId } = await getHostConnectAccount(userId);
+  // Make a balance read self-healing: if the minute job has not run yet,
+  // release this merchant's already-eligible bookings before returning totals.
+  await releaseEligibleBookingFunds({ limit: 100, hostId: userId });
+  const [stripeBalance, heldBookings] = await Promise.all([
+    stripe.balance.retrieve({}, { stripeAccount: accountId }),
+    Booking.find({
+      host: userId,
+      paymentFlow: PAYMENT_FLOW.PLATFORM_HOLD,
+      paymentStatus: {
+        $in: [
+          PAYMENT_STATUS.HELD,
+          PAYMENT_STATUS.REFUNDING,
+          PAYMENT_STATUS.RELEASING,
+        ],
+      },
+    }).select('currency totalAmount applicationFeeAmount merchantAmount'),
+  ]);
+
+  const byCurrency = new Map();
+  for (const booking of heldBookings) {
+    const currency = booking.currency || 'USD';
+    const merchantMinor = toStripeAmount(booking.merchantAmount, currency);
+    addMinorAmount(byCurrency, currency, 'held', merchantMinor);
+  }
+  for (const entry of stripeBalance.pending || []) {
+    addMinorAmount(byCurrency, entry.currency, 'stripePending', entry.amount);
+  }
+  for (const entry of stripeBalance.available || []) {
+    addMinorAmount(byCurrency, entry.currency, 'current', entry.amount);
+  }
+
+  const balances = Array.from(byCurrency.values())
+    .map((entry) => {
+      entry.pending = entry.held + entry.stripePending;
+      return {
+        currency: entry.currency,
+        pending: fromStripeAmount(entry.pending, entry.currency),
+        current: fromStripeAmount(entry.current, entry.currency),
+        breakdown: {
+          sevenDayHold: fromStripeAmount(entry.held, entry.currency),
+          stripeProcessing: fromStripeAmount(entry.stripePending, entry.currency),
+        },
+      };
+    })
+    .sort((a, b) => a.currency.localeCompare(b.currency));
+
+  return { accountId, balances };
+}
+
+function mapStripePayoutStatus(status) {
+  if (status === 'paid') return WITHDRAWAL_STATUS.PAID;
+  if (status === 'failed') return WITHDRAWAL_STATUS.FAILED;
+  if (status === 'canceled') return WITHDRAWAL_STATUS.CANCELED;
+  return WITHDRAWAL_STATUS.PENDING;
+}
+
+async function createWithdrawal(
+  userId,
+  { amount, currency, idempotencyKey }
+) {
+  const { accountId } = await getHostConnectAccount(userId, { requirePayouts: true });
+  const normalizedCurrency = currency.toUpperCase();
+  const amountMinor = toStripeAmount(amount, normalizedCurrency);
+  const normalizedAmount = fromStripeAmount(amountMinor, normalizedCurrency);
+  if (amountMinor <= 0 || Math.abs(normalizedAmount - amount) > 1e-9) {
+    throw new ApiError(
+      400,
+      `Withdrawal amount has invalid precision for ${normalizedCurrency}.`
+    );
+  }
+
+  let withdrawal = await Withdrawal.findOne({ host: userId, idempotencyKey });
+  if (withdrawal) {
+    const sameRequest =
+      withdrawal.currency === normalizedCurrency &&
+      toStripeAmount(withdrawal.amount, normalizedCurrency) === amountMinor;
+    if (!sameRequest) {
+      throw new ApiError(409, 'This idempotency key was already used for another withdrawal.');
+    }
+    if (withdrawal.stripePayoutId || withdrawal.status !== WITHDRAWAL_STATUS.PENDING) {
+      return withdrawal.toJSON();
+    }
+  }
+
+  const stripeBalance = await stripe.balance.retrieve({}, { stripeAccount: accountId });
+  const available = (stripeBalance.available || []).find(
+    (entry) => entry.currency.toUpperCase() === normalizedCurrency
+  );
+  if (!available || available.amount < amountMinor) {
+    const currentAmount = available ? fromStripeAmount(available.amount, normalizedCurrency) : 0;
+    throw new ApiError(
+      400,
+      `Withdrawal exceeds the current ${normalizedCurrency} balance of ${currentAmount}.`
+    );
+  }
+
+  if (!withdrawal) {
+    try {
+      withdrawal = await Withdrawal.create({
+        host: userId,
+        amount: fromStripeAmount(amountMinor, normalizedCurrency),
+        currency: normalizedCurrency,
+        status: WITHDRAWAL_STATUS.PENDING,
+        stripeAccountId: accountId,
+        idempotencyKey,
+      });
+    } catch (error) {
+      if (error && error.code === 11000) {
+        withdrawal = await Withdrawal.findOne({ host: userId, idempotencyKey });
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  const matchesExistingRequest =
+    withdrawal &&
+    withdrawal.currency === normalizedCurrency &&
+    toStripeAmount(withdrawal.amount, normalizedCurrency) === amountMinor;
+  if (!matchesExistingRequest) {
+    throw new ApiError(409, 'This idempotency key was already used for another withdrawal.');
+  }
+  if (withdrawal.stripePayoutId || withdrawal.status !== WITHDRAWAL_STATUS.PENDING) {
+    return withdrawal.toJSON();
+  }
+
+  try {
+    const payout = await stripe.payouts.create(
+      {
+        amount: amountMinor,
+        currency: normalizedCurrency.toLowerCase(),
+        metadata: {
+          withdrawalId: String(withdrawal._id),
+          hostId: String(userId),
+        },
+      },
+      {
+        stripeAccount: accountId,
+        idempotencyKey: `withdrawal_${withdrawal._id}_v1`,
+      }
+    );
+
+    withdrawal.stripePayoutId = payout.id;
+    withdrawal.status = mapStripePayoutStatus(payout.status);
+    withdrawal.arrivalDate = payout.arrival_date
+      ? new Date(payout.arrival_date * 1000)
+      : null;
+    if (withdrawal.status === WITHDRAWAL_STATUS.PAID) {
+      withdrawal.paidAt = new Date();
+    }
+    await withdrawal.save();
+    return withdrawal.toJSON();
+  } catch (error) {
+    // Network failures are ambiguous and safe to retry with the same key.
+    // Definite Stripe request failures can be recorded as failed immediately.
+    if (error && (error.type === 'StripeInvalidRequestError' || error.type === 'StripeCardError')) {
+      withdrawal.status = WITHDRAWAL_STATUS.FAILED;
+      withdrawal.failedAt = new Date();
+      withdrawal.failureReason = error.message || 'Stripe rejected the payout request.';
+      await withdrawal.save();
+      throw new ApiError(400, withdrawal.failureReason);
+    }
+    throw error;
+  }
+}
+
+async function listWithdrawals(userId, { page = 1, limit = 20 } = {}) {
+  const skip = (page - 1) * limit;
+  const [withdrawals, total] = await Promise.all([
+    Withdrawal.find({ host: userId })
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit),
+    Withdrawal.countDocuments({ host: userId }),
+  ]);
+
+  const totalPages = Math.ceil(total / limit);
+  return {
+    withdrawals: withdrawals.map((withdrawal) => withdrawal.toJSON()),
+    pagination: {
+      total,
+      page,
+      limit,
+      totalPages,
+      hasNextPage: page < totalPages,
+      hasPrevPage: page > 1,
+    },
+  };
+}
+
+async function releaseBookingFunds(bookingId) {
+  const initialBooking = await Booking.findById(bookingId);
+  if (!initialBooking) {
+    throw new ApiError(404, 'Booking not found.');
+  }
+  if (initialBooking.paymentFlow !== PAYMENT_FLOW.PLATFORM_HOLD) {
+    return { released: false, reason: 'legacy_destination_charge' };
+  }
+  if (initialBooking.paymentStatus === PAYMENT_STATUS.RELEASED) {
+    return { released: true, booking: initialBooking.toJSON() };
+  }
+  if (
+    !initialBooking.payoutEligibleAt ||
+    initialBooking.payoutEligibleAt.getTime() > Date.now()
+  ) {
+    return { released: false, reason: 'hold_window_open' };
+  }
+
+  const pendingRefund = await RefundRequest.findOne({
+    booking: initialBooking._id,
+    status: {
+      $in: [REFUND_REQUEST_STATUS.PENDING, REFUND_REQUEST_STATUS.PROCESSING],
+    },
+  }).select('_id');
+  if (pendingRefund) {
+    if (
+      !initialBooking.activeRefundRequest ||
+      initialBooking.activeRefundRequest.toString() !== pendingRefund._id.toString()
+    ) {
+      await Booking.updateOne(
+        { _id: initialBooking._id, paymentStatus: PAYMENT_STATUS.HELD },
+        { $set: { activeRefundRequest: pendingRefund._id } }
+      );
+    }
+    return { released: false, reason: 'refund_pending' };
+  }
+
+  if (initialBooking.activeRefundRequest) {
+    await Booking.updateOne(
+      { _id: initialBooking._id, activeRefundRequest: initialBooking.activeRefundRequest },
+      { $set: { activeRefundRequest: null } }
+    );
+    initialBooking.activeRefundRequest = null;
+  }
+
+  const booking = await Booking.findOneAndUpdate(
+    {
+      _id: initialBooking._id,
+      paymentFlow: PAYMENT_FLOW.PLATFORM_HOLD,
+      paymentStatus: PAYMENT_STATUS.HELD,
+      payoutEligibleAt: { $lte: new Date() },
+      $or: [
+        { activeRefundRequest: null },
+        { activeRefundRequest: { $exists: false } },
+      ],
+    },
+    { $set: { paymentStatus: PAYMENT_STATUS.RELEASING } },
+    { new: true }
+  );
+
+  if (!booking) {
+    const latest = await Booking.findById(bookingId);
+    return {
+      released: latest && latest.paymentStatus === PAYMENT_STATUS.RELEASED,
+      reason: latest ? latest.paymentStatus : 'not_found',
+      booking: latest ? latest.toJSON() : null,
+    };
+  }
+
+  const currency = booking.currency || 'USD';
+  const merchantAmount = toStripeAmount(booking.merchantAmount, currency);
+
+  try {
+    let transfer = null;
+    if (merchantAmount > 0) {
+      transfer = await stripe.transfers.create(
+        {
+          amount: merchantAmount,
+          currency: currency.toLowerCase(),
+          destination: booking.stripeAccountId,
+          transfer_group: `booking_${booking._id}`,
+          description: `Funsival Booking #${booking._id} merchant release`,
+          metadata: {
+            bookingId: String(booking._id),
+            hostId: String(booking.host),
+          },
+        },
+        { idempotencyKey: `booking_${booking._id}_merchant_release_v1` }
+      );
+    }
+
+    booking.paymentStatus = PAYMENT_STATUS.RELEASED;
+    booking.stripeTransferId = transfer ? transfer.id : null;
+    booking.releasedAt = new Date();
+    await booking.save();
+
+    sendNotification(booking.host, {
+      type: NOTIFICATION_TYPES.BOOKING_PAYOUT_RELEASED,
+      title: 'Funds available',
+      body: `${currency} ${booking.merchantAmount} moved from pending to your current balance.`,
+      data: {
+        bookingId: booking._id.toString(),
+        listingId: booking.listing ? booking.listing.toString() : '',
+        stripeTransferId: booking.stripeTransferId || '',
+      },
+    }).catch((error) => console.error('Failed to notify host of fund release.', error));
+
+    return { released: true, booking: booking.toJSON() };
+  } catch (error) {
+    await Booking.updateOne(
+      { _id: booking._id, paymentStatus: PAYMENT_STATUS.RELEASING },
+      { $set: { paymentStatus: PAYMENT_STATUS.HELD } }
+    );
+    throw error;
+  }
+}
+
+async function releaseEligibleBookingFunds({ limit = 50, hostId = null } = {}) {
+  const now = new Date();
+
+  // Old destination-charge bookings were transferred at capture time. Mark
+  // them released after their legacy hold date, but never create another
+  // transfer for them.
+  const legacyReleaseFilter = {
+    paymentStatus: PAYMENT_STATUS.HELD,
+    payoutEligibleAt: { $lte: now },
+    $or: [
+      { paymentFlow: PAYMENT_FLOW.DESTINATION_CHARGE },
+      { paymentFlow: { $exists: false } },
+    ],
+  };
+  if (hostId) legacyReleaseFilter.host = hostId;
+  await Booking.updateMany(
+    legacyReleaseFilter,
+    {
+      $set: {
+        paymentFlow: PAYMENT_FLOW.DESTINATION_CHARGE,
+        paymentStatus: PAYMENT_STATUS.RELEASED,
+        releasedAt: now,
+      },
+    }
+  );
+
+  // Recover releases interrupted after the database claim. Stripe idempotency
+  // ensures retrying cannot create a duplicate transfer.
+  const staleReleaseCutoff = new Date(Date.now() - 10 * 60 * 1000);
+  const staleReleaseFilter = {
+    paymentFlow: PAYMENT_FLOW.PLATFORM_HOLD,
+    paymentStatus: PAYMENT_STATUS.RELEASING,
+    updatedAt: { $lte: staleReleaseCutoff },
+  };
+  if (hostId) staleReleaseFilter.host = hostId;
+  await Booking.updateMany(
+    staleReleaseFilter,
+    { $set: { paymentStatus: PAYMENT_STATUS.HELD } }
+  );
+
+  const eligibleFilter = {
+    paymentFlow: PAYMENT_FLOW.PLATFORM_HOLD,
+    paymentStatus: PAYMENT_STATUS.HELD,
+    payoutEligibleAt: { $lte: now },
+  };
+  if (hostId) eligibleFilter.host = hostId;
+
+  const eligible = await Booking.find(eligibleFilter)
+    .sort({ payoutEligibleAt: 1 })
+    .limit(limit)
+    .select('_id');
+
+  const results = [];
+  for (const booking of eligible) {
+    try {
+      results.push(await releaseBookingFunds(booking._id));
+    } catch (error) {
+      console.error(`Failed to release booking ${booking._id}:`, error.message || error);
+      results.push({ released: false, bookingId: booking._id.toString(), reason: 'error' });
+    }
+  }
+  return results;
+}
+
+async function syncWithdrawalFromPayout(payout, connectedAccountId) {
+  if (!payout || !payout.id) return;
+  const filter = { stripePayoutId: payout.id };
+  if (connectedAccountId) filter.stripeAccountId = connectedAccountId;
+
+  let withdrawal = await Withdrawal.findOne(filter);
+  const metadataWithdrawalId =
+    payout.metadata && typeof payout.metadata.withdrawalId === 'string'
+      ? payout.metadata.withdrawalId
+      : '';
+  if (!withdrawal && /^[a-f\d]{24}$/i.test(metadataWithdrawalId)) {
+    const metadataFilter = { _id: metadataWithdrawalId };
+    if (connectedAccountId) metadataFilter.stripeAccountId = connectedAccountId;
+    withdrawal = await Withdrawal.findOne(metadataFilter);
+  }
+  if (!withdrawal) return;
+
+  const previousStatus = withdrawal.status;
+  withdrawal.stripePayoutId = payout.id;
+  withdrawal.status = mapStripePayoutStatus(payout.status);
+  withdrawal.arrivalDate = payout.arrival_date
+    ? new Date(payout.arrival_date * 1000)
+    : withdrawal.arrivalDate;
+  withdrawal.failureReason = payout.failure_message || null;
+  if (withdrawal.status === WITHDRAWAL_STATUS.PAID) {
+    withdrawal.paidAt = withdrawal.paidAt || new Date();
+  } else if (withdrawal.status === WITHDRAWAL_STATUS.FAILED) {
+    withdrawal.failedAt = withdrawal.failedAt || new Date();
+  }
+  await withdrawal.save();
+
+  if (previousStatus === withdrawal.status) return;
+  if (withdrawal.status === WITHDRAWAL_STATUS.PAID) {
+    sendNotification(withdrawal.host, {
+      type: NOTIFICATION_TYPES.WITHDRAWAL_PAID,
+      title: 'Withdrawal paid',
+      body: `${withdrawal.currency} ${withdrawal.amount} was sent to your bank account.`,
+      data: { withdrawalId: withdrawal._id.toString() },
+    }).catch((error) => console.error('Failed to notify host of paid withdrawal.', error));
+  } else if (withdrawal.status === WITHDRAWAL_STATUS.FAILED) {
+    sendNotification(withdrawal.host, {
+      type: NOTIFICATION_TYPES.WITHDRAWAL_FAILED,
+      title: 'Withdrawal failed',
+      body: withdrawal.failureReason || 'Stripe could not complete your withdrawal.',
+      data: { withdrawalId: withdrawal._id.toString() },
+    }).catch((error) => console.error('Failed to notify host of failed withdrawal.', error));
+  }
 }
 
 async function syncConnectedAccountFromEvent(account) {
@@ -624,6 +1244,8 @@ async function syncConnectedAccountFromEvent(account) {
   if (!user) return;
 
   user.stripeConnect.chargesEnabled = Boolean(account.charges_enabled);
+  user.stripeConnect.transfersEnabled =
+    account.capabilities && account.capabilities.transfers === 'active';
   user.stripeConnect.payoutsEnabled = Boolean(account.payouts_enabled);
   user.stripeConnect.detailsSubmitted = Boolean(account.details_submitted);
   user.stripeConnect.disabledReason =
@@ -673,7 +1295,11 @@ async function handlePaymentIntentCanceled(paymentIntent) {
   if (
     booking.paymentStatus === PAYMENT_STATUS.AUTH_RELEASED ||
     booking.paymentStatus === PAYMENT_STATUS.REFUNDED ||
-    booking.paymentStatus === PAYMENT_STATUS.HELD
+    booking.paymentStatus === PAYMENT_STATUS.HELD ||
+    booking.paymentStatus === PAYMENT_STATUS.REFUNDING ||
+    booking.paymentStatus === PAYMENT_STATUS.RELEASING ||
+    booking.paymentStatus === PAYMENT_STATUS.RELEASED ||
+    booking.paymentStatus === PAYMENT_STATUS.DISPUTED
   ) {
     return;
   }
@@ -698,6 +1324,7 @@ async function handleChargeRefunded(charge) {
   booking.paymentStatus = PAYMENT_STATUS.REFUNDED;
   booking.status = BOOKING_STATUS.CANCELLED;
   booking.refundedAt = booking.refundedAt || new Date();
+  booking.activeRefundRequest = null;
   await booking.save();
 }
 
@@ -711,37 +1338,6 @@ async function handleChargeDispute(dispute) {
   await booking.save();
 }
 
-async function handlePayoutPaid(payout) {
-  // When a payout actually leaves Stripe and lands in the provider's bank,
-  // mark any held bookings whose hold window has elapsed as released.
-  const now = new Date();
-  const filter = {
-    paymentStatus: PAYMENT_STATUS.HELD,
-    payoutEligibleAt: { $lte: now },
-    stripeAccountId: payout.destination ? String(payout.destination) : { $exists: true },
-  };
-
-  const releasedBookings = await Booking.find(filter).select(
-    '_id host listing currency totalAmount'
-  );
-
-  if (releasedBookings.length === 0) return;
-
-  await Booking.updateMany(filter, { $set: { paymentStatus: PAYMENT_STATUS.RELEASED } });
-
-  for (const booking of releasedBookings) {
-    sendNotification(booking.host, {
-      type: NOTIFICATION_TYPES.BOOKING_PAYOUT_RELEASED,
-      title: 'Payout released',
-      body: `Your payout of ${booking.currency} ${booking.totalAmount} is on its way to your bank.`,
-      data: {
-        bookingId: booking._id.toString(),
-        listingId: booking.listing ? booking.listing.toString() : '',
-      },
-    }).catch((error) => console.error('Failed to notify host of payout release.', error));
-  }
-}
-
 module.exports = {
   createOnboardingLink,
   getConnectAccountStatus,
@@ -753,11 +1349,23 @@ module.exports = {
   cancelAuthorizationForBooking,
   refundBooking,
   executeStripeRefund,
+  getMerchantBalance,
+  createWithdrawal,
+  listWithdrawals,
+  releaseBookingFunds,
+  releaseEligibleBookingFunds,
+  syncWithdrawalFromPayout,
   syncConnectedAccountFromEvent,
   handlePaymentIntentSucceeded,
   handlePaymentIntentAuthorized,
   handlePaymentIntentCanceled,
   handleChargeRefunded,
   handleChargeDispute,
-  handlePayoutPaid,
+  _private: {
+    toStripeAmount,
+    fromStripeAmount,
+    calculatePaymentSplit,
+    calculatePayoutEligibleAt,
+    isPayoutEligible,
+  },
 };
