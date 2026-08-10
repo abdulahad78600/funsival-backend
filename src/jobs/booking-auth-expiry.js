@@ -10,6 +10,7 @@ const { NOTIFICATION_TYPES } = require('../modules/notifications/notifications.v
 const RUN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const EXPIRY_BUFFER_MS = 12 * 60 * 60 * 1000; // act 12h before Stripe auto-voids
 const REMINDER_WINDOW_MS = 36 * 60 * 60 * 1000; // remind starting 36h before expiry
+const STALE_UNPAID_MAX_AGE_MS = 30 * 60 * 1000; // give abandoned checkouts 30 min
 
 async function remindHostsOfPendingAuthorizations() {
   const now = Date.now();
@@ -89,9 +90,39 @@ async function expirePendingAuthorizations() {
   }
 }
 
+// PENDING bookings whose payment never completed (declined card, abandoned
+// checkout, server crash mid-request) still count as active in the slot
+// conflict checks. Cancel them once they are clearly abandoned so the time
+// slots they were holding open up again.
+async function cancelStaleUnpaidBookings() {
+  const cutoff = new Date(Date.now() - STALE_UNPAID_MAX_AGE_MS);
+
+  const bookings = await Booking.find({
+    status: BOOKING_STATUS.PENDING,
+    paymentStatus: {
+      $in: [PAYMENT_STATUS.REQUIRES_PAYMENT, PAYMENT_STATUS.FAILED],
+    },
+    createdAt: { $lte: cutoff },
+  }).limit(100);
+
+  for (const booking of bookings) {
+    try {
+      booking.status = BOOKING_STATUS.CANCELLED;
+      booking.cancelledAt = booking.cancelledAt || new Date();
+      await booking.save();
+    } catch (error) {
+      console.error(
+        `Failed to cancel stale unpaid booking ${booking._id}:`,
+        error.message || error
+      );
+    }
+  }
+}
+
 async function runOnce() {
   await remindHostsOfPendingAuthorizations();
   await expirePendingAuthorizations();
+  await cancelStaleUnpaidBookings();
 }
 
 function startBookingAuthExpiryJob() {
@@ -116,4 +147,5 @@ module.exports = {
   startBookingAuthExpiryJob,
   expirePendingAuthorizations,
   remindHostsOfPendingAuthorizations,
+  cancelStaleUnpaidBookings,
 };

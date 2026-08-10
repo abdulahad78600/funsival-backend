@@ -301,6 +301,13 @@ async function authorizeBookingPayment(bookingId, guestUser, paymentMethodId) {
       capture_method: 'manual',
       confirm: true,
       off_session: false,
+      // We confirm server-side with a saved card and have no return_url, so
+      // redirect-based payment methods enabled in the Dashboard must be
+      // excluded or Stripe rejects the confirmation.
+      automatic_payment_methods: {
+        enabled: true,
+        allow_redirects: 'never',
+      },
       setup_future_usage: 'off_session',
       transfer_group: `booking_${booking._id}`,
       description: `Funsival Booking #${booking._id}`,

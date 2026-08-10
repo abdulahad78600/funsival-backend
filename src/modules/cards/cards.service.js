@@ -60,6 +60,12 @@ async function createSetupIntent(userId) {
   const setupIntent = await stripe.setupIntents.create({
     customer: customerId,
     usage: 'off_session',
+    // Saved cards are later confirmed server-side without a return_url, so
+    // keep redirect-based payment methods out of the save-card flow too.
+    automatic_payment_methods: {
+      enabled: true,
+      allow_redirects: 'never',
+    },
     metadata: { userId: String(user._id) },
   });
 

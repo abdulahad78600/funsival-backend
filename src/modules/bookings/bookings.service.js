@@ -548,11 +548,27 @@ async function createBooking(payload, userId) {
   });
 
   const guest = await User.findById(userId);
-  const payment = await paymentsService.authorizeBookingPayment(
-    booking._id,
-    guest,
-    payload.paymentMethodId
-  );
+  let payment;
+  try {
+    payment = await paymentsService.authorizeBookingPayment(
+      booking._id,
+      guest,
+      payload.paymentMethodId
+    );
+  } catch (error) {
+    // The booking was inserted before payment authorization; if the payment
+    // never got off the ground, remove it so its slots free up immediately
+    // instead of blocking the calendar as a phantom PENDING booking.
+    const current = await Booking.findById(booking._id).select('paymentStatus');
+    if (
+      current &&
+      (current.paymentStatus === PAYMENT_STATUS.REQUIRES_PAYMENT ||
+        current.paymentStatus === PAYMENT_STATUS.FAILED)
+    ) {
+      await Booking.deleteOne({ _id: current._id });
+    }
+    throw error;
+  }
 
   return {
     booking: booking.toJSON(),
