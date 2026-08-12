@@ -10,6 +10,8 @@ process.env.STRIPE_APPLICATION_FEE_PERCENT = '10';
 const paymentsService = require('../src/modules/payments/payments.service');
 const {
   validateWithdrawalPayload,
+  validateEarningsQuery,
+  validateTransactionsQuery,
 } = require('../src/modules/payments/payments.validation');
 
 const {
@@ -65,4 +67,53 @@ test('withdrawals require positive funds, a currency, and an idempotency key', (
     () => validateWithdrawalPayload({ amount: 10, currency: 'USD' }, ''),
     /Idempotency-Key/
   );
+});
+
+test('earnings graph ranges use complete UTC days and months', () => {
+  const { getEarningsWindow, buildBucketKeys } = paymentsService._private;
+  const now = new Date('2026-08-12T14:30:00.000Z');
+  const twentyFourHours = getEarningsWindow('24h', now);
+  const sevenDays = getEarningsWindow('7d', now);
+  const twelveMonths = getEarningsWindow('12m', now);
+
+  assert.equal(twentyFourHours.startDate.toISOString(), '2026-08-11T15:00:00.000Z');
+  assert.equal(twentyFourHours.endDate.toISOString(), '2026-08-12T15:00:00.000Z');
+  assert.equal(
+    buildBucketKeys(twentyFourHours.startDate, twentyFourHours.endDate, 'hour').length,
+    24
+  );
+  assert.equal(sevenDays.startDate.toISOString(), '2026-08-06T00:00:00.000Z');
+  assert.equal(sevenDays.endDate.toISOString(), '2026-08-13T00:00:00.000Z');
+  assert.equal(buildBucketKeys(sevenDays.startDate, sevenDays.endDate, 'day').length, 7);
+  assert.equal(twelveMonths.startDate.toISOString(), '2025-09-01T00:00:00.000Z');
+  assert.equal(twelveMonths.endDate.toISOString(), '2026-09-01T00:00:00.000Z');
+  assert.equal(
+    buildBucketKeys(twelveMonths.startDate, twelveMonths.endDate, 'month').length,
+    12
+  );
+});
+
+test('earnings and transaction query filters are normalized', () => {
+  assert.deepEqual(validateEarningsQuery({ range: '30D', currency: 'usd' }), {
+    range: '30d',
+    currency: 'USD',
+  });
+  assert.deepEqual(
+    validateTransactionsQuery({ page: '2', limit: '500', type: 'withdrawals' }),
+    { page: 2, limit: 100, type: 'withdrawal', currency: null }
+  );
+  assert.throws(() => validateEarningsQuery({ range: 'year' }), /Invalid earnings range/);
+  assert.throws(
+    () => validateTransactionsQuery({ type: 'refund' }),
+    /Invalid transaction type/
+  );
+});
+
+test('booking payment states map to dashboard earning states', () => {
+  const { mapEarningStatus } = paymentsService._private;
+
+  assert.equal(mapEarningStatus('held'), 'pending');
+  assert.equal(mapEarningStatus('releasing'), 'processing');
+  assert.equal(mapEarningStatus('released'), 'available');
+  assert.equal(mapEarningStatus('refunded'), 'refunded');
 });

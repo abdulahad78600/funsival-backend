@@ -9,6 +9,7 @@ const notificationsRoutes = require('../modules/notifications/notifications.rout
 const paymentsRoutes = require('../modules/payments/payments.routes');
 const cardsRoutes = require('../modules/cards/cards.routes');
 const reviewsRoutes = require('../modules/reviews/reviews.routes');
+const dashboardRoutes = require('../modules/dashboard/dashboard.routes');
 const { guestRouter: refundsGuestRouter, adminRouter: refundsAdminRouter } = require('../modules/refunds/refunds.routes');
 
 const router = express.Router();
@@ -23,6 +24,7 @@ router.use('/notifications', notificationsRoutes);
 router.use('/payments', paymentsRoutes);
 router.use('/payments/cards', cardsRoutes);
 router.use('/reviews', reviewsRoutes);
+router.use('/dashboard', dashboardRoutes);
 router.use('/admin/refund-requests', refundsAdminRouter);
 
 module.exports = router;

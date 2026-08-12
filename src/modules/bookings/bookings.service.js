@@ -21,6 +21,13 @@ const { buildNewBookingHostEmail } = require('./bookings.templates');
 const { sendNotification } = require('../notifications/notifications.service');
 const { NOTIFICATION_TYPES } = require('../notifications/notifications.validation');
 
+const HOST_REVENUE_PAYMENT_STATUSES = [
+  PAYMENT_STATUS.HELD,
+  PAYMENT_STATUS.REFUNDING,
+  PAYMENT_STATUS.RELEASING,
+  PAYMENT_STATUS.RELEASED,
+];
+
 function timeStringToMinutes(time) {
   const [hours, minutes] = time.split(':').map(Number);
   return hours * 60 + minutes;
@@ -637,7 +644,7 @@ async function getBookingsForGuest(userId, { page = 1, limit = 10 } = {}) {
   };
 }
 
-const RESERVATION_TABS = ['active', 'upcoming', 'completed', 'cancelled'];
+const RESERVATION_TABS = ['all', 'active', 'upcoming', 'completed', 'cancelled'];
 
 function buildReservationStatusFilter(tab, now) {
   switch (tab) {
@@ -661,7 +668,7 @@ function buildReservationStatusFilter(tab, now) {
   }
 }
 
-function buildCreatedAtRange(date) {
+function buildReservationDateFilter(date) {
   if (!date) return null;
   const parsed = new Date(date);
   if (Number.isNaN(parsed.getTime())) return null;
@@ -669,87 +676,524 @@ function buildCreatedAtRange(date) {
   start.setUTCHours(0, 0, 0, 0);
   const end = new Date(start);
   end.setUTCDate(end.getUTCDate() + 1);
-  return { $gte: start, $lt: end };
+  return {
+    startDate: { $lt: end },
+    endDate: { $gte: start },
+  };
+}
+
+function combineReservationFilters(...filters) {
+  const activeFilters = filters.filter(Boolean);
+  if (activeFilters.length === 1) return activeFilters[0];
+  return { $and: activeFilters };
+}
+
+function escapeSearchPattern(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function buildReservationSearchFilter(search, hostId) {
+  if (!search) return null;
+
+  const regex = new RegExp(escapeSearchPattern(search), 'i');
+  const customerTokenFilters = search
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => {
+      const tokenRegex = new RegExp(escapeSearchPattern(token), 'i');
+      return {
+        $or: [
+          { email: tokenRegex },
+          { city: tokenRegex },
+          { 'providerProfile.firstName': tokenRegex },
+          { 'providerProfile.lastName': tokenRegex },
+          { 'providerProfile.businessName': tokenRegex },
+        ],
+      };
+    });
+  const [matchingListings, matchingCustomers] = await Promise.all([
+    Listing.find({
+      createdBy: hostId,
+      $or: [
+        { 'basicInformation.activityTitle': regex },
+        { 'basicInformation.location': regex },
+        { 'placeLocation.city': regex },
+        { category: regex },
+        { type: regex },
+      ],
+    })
+      .select('_id')
+      .lean(),
+    User.find({ $and: customerTokenFilters })
+      .select('_id')
+      .lean(),
+  ]);
+
+  const matches = [
+    { listing: { $in: matchingListings.map((listing) => listing._id) } },
+    { bookedBy: { $in: matchingCustomers.map((customer) => customer._id) } },
+  ];
+  if (mongoose.Types.ObjectId.isValid(search)) {
+    matches.unshift({ _id: new mongoose.Types.ObjectId(search) });
+  }
+
+  return { $or: matches };
+}
+
+function reservationCountFacet(now) {
+  const countPipeline = (filter) => [{ $match: filter }, { $count: 'count' }];
+  return {
+    all: [{ $count: 'count' }],
+    active: countPipeline(buildReservationStatusFilter('active', now)),
+    upcoming: countPipeline(buildReservationStatusFilter('upcoming', now)),
+    completed: countPipeline(buildReservationStatusFilter('completed', now)),
+    cancelled: countPipeline(buildReservationStatusFilter('cancelled', now)),
+  };
+}
+
+function readReservationCounts(facetResult) {
+  const count = (key) => {
+    const rows = facetResult && facetResult[key];
+    return rows && rows[0] ? rows[0].count : 0;
+  };
+  return {
+    all: count('all'),
+    active: count('active'),
+    upcoming: count('upcoming'),
+    completed: count('completed'),
+    cancelled: count('cancelled'),
+  };
+}
+
+async function buildHostReservationQuery(
+  hostId,
+  { tab = 'all', date = null, search = '' } = {},
+  now = new Date()
+) {
+  const normalizedHostId =
+    hostId instanceof mongoose.Types.ObjectId
+      ? hostId
+      : new mongoose.Types.ObjectId(String(hostId));
+  const normalizedTab = typeof tab === 'string' ? tab.trim().toLowerCase() : 'all';
+  if (!RESERVATION_TABS.includes(normalizedTab)) {
+    throw new ApiError(
+      400,
+      `Invalid tab. Allowed values: ${RESERVATION_TABS.join(', ')}.`
+    );
+  }
+
+  const trimmedSearch = typeof search === 'string' ? search.trim() : '';
+  const searchFilter = await buildReservationSearchFilter(
+    trimmedSearch,
+    normalizedHostId
+  );
+  const dateFilter = buildReservationDateFilter(date);
+  const commonFilter = combineReservationFilters(
+    { host: normalizedHostId },
+    dateFilter,
+    searchFilter
+  );
+
+  return {
+    commonFilter,
+    filter: combineReservationFilters(
+      commonFilter,
+      buildReservationStatusFilter(normalizedTab, now)
+    ),
+    normalizedTab,
+    trimmedSearch,
+  };
 }
 
 async function getBookingsForHost(
   hostId,
-  { page = 1, limit = 10, tab, date, search } = {}
+  { page = 1, limit = 10, tab = 'all', date = null, search = '' } = {}
 ) {
   const skip = (page - 1) * limit;
-  const filter = { host: hostId };
+  const now = new Date();
+  const { commonFilter, filter, normalizedTab, trimmedSearch } =
+    await buildHostReservationQuery(hostId, { tab, date, search }, now);
 
-  const normalizedTab = typeof tab === 'string' ? tab.trim().toLowerCase() : '';
-  if (normalizedTab) {
-    if (!RESERVATION_TABS.includes(normalizedTab)) {
-      throw new ApiError(
-        400,
-        `Invalid tab. Allowed values: ${RESERVATION_TABS.join(', ')}.`
-      );
-    }
-    Object.assign(filter, buildReservationStatusFilter(normalizedTab, new Date()));
-  }
-
-  const createdAtRange = buildCreatedAtRange(date);
-  if (createdAtRange) {
-    filter.createdAt = createdAtRange;
-  }
-
-  const trimmedSearch = typeof search === 'string' ? search.trim() : '';
-  if (trimmedSearch) {
-    if (!mongoose.Types.ObjectId.isValid(trimmedSearch)) {
-      return {
-        bookings: [],
-        pagination: buildPagination(0, page, limit),
-      };
-    }
-    filter._id = new mongoose.Types.ObjectId(trimmedSearch);
-  }
-
-  const [bookings, total] = await Promise.all([
+  const [bookings, [countResult = {}]] = await Promise.all([
     Booking.find(filter)
       .populate('listing')
-      .populate('bookedBy', 'email role city')
+      .populate(
+        'bookedBy',
+        'email role city providerProfile.firstName providerProfile.lastName'
+      )
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit),
-    Booking.countDocuments(filter),
+    Booking.aggregate([
+      { $match: commonFilter },
+      { $facet: reservationCountFacet(now) },
+    ]),
   ]);
 
   await paymentsService.reconcileProcessingBookings(bookings);
 
+  const counts = readReservationCounts(countResult);
+  const total = counts[normalizedTab];
+
   return {
     bookings: bookings.map((booking) => booking.toJSON()),
     pagination: buildPagination(total, page, limit),
+    filters: {
+      tab: normalizedTab,
+      search: trimmedSearch || null,
+      date: date ? new Date(date).toISOString().slice(0, 10) : null,
+      counts: {
+        all: counts.all,
+        upcoming: counts.upcoming,
+        completed: counts.completed,
+        cancelled: counts.cancelled,
+      },
+    },
   };
+}
+
+function csvCell(value) {
+  if (value === undefined || value === null) return '';
+  let stringValue = value instanceof Date ? value.toISOString() : String(value);
+  if (/^[=+\-@]/.test(stringValue)) stringValue = `'${stringValue}`;
+  return `"${stringValue.replace(/"/g, '""')}"`;
+}
+
+function getCustomerName(customer) {
+  if (!customer) return '';
+  const profile = customer.providerProfile;
+  const fullName = profile
+    ? [profile.firstName, profile.lastName].filter(Boolean).join(' ')
+    : '';
+  return fullName || customer.email || '';
+}
+
+async function exportHostBookingsCsv(
+  hostId,
+  { tab = 'all', date = null, search = '' } = {}
+) {
+  const { filter } = await buildHostReservationQuery(hostId, { tab, date, search });
+  const bookings = await Booking.find(filter)
+    .populate('listing', 'basicInformation.activityTitle category type')
+    .populate(
+      'bookedBy',
+      'email city providerProfile.firstName providerProfile.lastName'
+    )
+    .sort({ createdAt: -1 })
+    .limit(10000)
+    .lean();
+  const headers = [
+    'Reservation ID',
+    'Listing',
+    'Category',
+    'Type',
+    'Reserved By',
+    'Customer Email',
+    'Start Date',
+    'Start Time',
+    'End Date',
+    'End Time',
+    'Reservation Status',
+    'Payment Status',
+    'Gross Amount',
+    'Host Earnings',
+    'Currency',
+    'Booked At',
+  ];
+  const rows = bookings.map((booking) => {
+    const listing = booking.listing;
+    const customer = booking.bookedBy;
+    return [
+      booking._id,
+      listing && listing.basicInformation
+        ? listing.basicInformation.activityTitle
+        : '',
+      listing ? listing.category : '',
+      listing ? listing.type : '',
+      getCustomerName(customer),
+      customer ? customer.email : '',
+      booking.startDate,
+      booking.startTime,
+      booking.endDate,
+      booking.endTime,
+      booking.status,
+      booking.paymentStatus,
+      booking.totalAmount,
+      booking.merchantAmount,
+      booking.currency,
+      booking.createdAt,
+    ].map(csvCell).join(',');
+  });
+
+  return `\uFEFF${[headers.map(csvCell).join(','), ...rows].join('\n')}`;
+}
+
+function startOfUtcWeek(date) {
+  const start = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate())
+  );
+  const daysSinceMonday = (start.getUTCDay() + 6) % 7;
+  start.setUTCDate(start.getUTCDate() - daysSinceMonday);
+  return start;
+}
+
+function rate(numerator, denominator) {
+  return denominator > 0
+    ? Math.round(((numerator / denominator) * 100 + Number.EPSILON) * 100) / 100
+    : 0;
+}
+
+function changePercentage(current, previous) {
+  if (previous === 0) return current === 0 ? 0 : null;
+  return Math.round((((current - previous) / previous) * 100 + Number.EPSILON) * 100) / 100;
 }
 
 async function getHostReservationStats(hostId) {
   const now = new Date();
-  const baseFilter = { host: hostId };
+  const normalizedHostId =
+    hostId instanceof mongoose.Types.ObjectId
+      ? hostId
+      : new mongoose.Types.ObjectId(String(hostId));
+  const weekStart = startOfUtcWeek(now);
+  const previousWeekStart = new Date(weekStart);
+  previousWeekStart.setUTCDate(previousWeekStart.getUTCDate() - 7);
+  const nextWeekStart = new Date(weekStart);
+  nextWeekStart.setUTCDate(nextWeekStart.getUTCDate() + 7);
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const previousMonthStart = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)
+  );
+  const nextMonthStart = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1)
+  );
 
-  const [upcoming, completed, cancelled, pending] = await Promise.all([
-    Booking.countDocuments({
-      ...baseFilter,
-      ...buildReservationStatusFilter('upcoming', now),
-    }),
-    Booking.countDocuments({
-      ...baseFilter,
-      ...buildReservationStatusFilter('completed', now),
-    }),
-    Booking.countDocuments({
-      ...baseFilter,
-      ...buildReservationStatusFilter('cancelled', now),
-    }),
-    Booking.countDocuments({
-      ...baseFilter,
-      status: {
-        $in: [BOOKING_STATUS.PENDING, BOOKING_STATUS.AWAITING_HOST_APPROVAL],
+  const [
+    statusRows,
+    upcomingCount,
+    weekRows,
+    revenueRows,
+    customerRows,
+    completionRows,
+  ] =
+    await Promise.all([
+      Booking.aggregate([
+        { $match: { host: normalizedHostId } },
+        { $group: { _id: '$status', count: { $sum: 1 } } },
+      ]),
+      Booking.countDocuments({
+        host: normalizedHostId,
+        ...buildReservationStatusFilter('upcoming', now),
+      }),
+      Booking.aggregate([
+        {
+          $match: {
+            host: normalizedHostId,
+            createdAt: { $gte: previousWeekStart, $lt: nextWeekStart },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            currentWeek: {
+              $sum: { $cond: [{ $gte: ['$createdAt', weekStart] }, 1, 0] },
+            },
+            previousWeek: {
+              $sum: { $cond: [{ $lt: ['$createdAt', weekStart] }, 1, 0] },
+            },
+          },
+        },
+      ]),
+      Booking.aggregate([
+        {
+          $match: {
+            host: normalizedHostId,
+            paidAt: { $ne: null },
+            paymentStatus: { $in: HOST_REVENUE_PAYMENT_STATUSES },
+          },
+        },
+        {
+          $project: {
+            currency: { $toUpper: { $ifNull: ['$currency', 'USD'] } },
+            amount: { $ifNull: ['$merchantAmount', 0] },
+            paidAt: 1,
+          },
+        },
+        {
+          $group: {
+            _id: '$currency',
+            total: { $sum: '$amount' },
+            currentMonth: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $gte: ['$paidAt', monthStart] },
+                      { $lt: ['$paidAt', nextMonthStart] },
+                    ],
+                  },
+                  '$amount',
+                  0,
+                ],
+              },
+            },
+            previousMonth: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $gte: ['$paidAt', previousMonthStart] },
+                      { $lt: ['$paidAt', monthStart] },
+                    ],
+                  },
+                  '$amount',
+                  0,
+                ],
+              },
+            },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      Booking.aggregate([
+        {
+          $match: {
+            host: normalizedHostId,
+            status: { $nin: [BOOKING_STATUS.CANCELLED, BOOKING_STATUS.DECLINED] },
+          },
+        },
+        { $group: { _id: '$bookedBy', firstReservationAt: { $min: '$createdAt' } } },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            newThisWeek: {
+              $sum: {
+                $cond: [{ $gte: ['$firstReservationAt', weekStart] }, 1, 0],
+              },
+            },
+          },
+        },
+      ]),
+      Booking.aggregate([
+        {
+          $match: {
+            host: normalizedHostId,
+            status: {
+              $in: [
+                BOOKING_STATUS.COMPLETED,
+                BOOKING_STATUS.CANCELLED,
+                BOOKING_STATUS.DECLINED,
+              ],
+            },
+            startDate: { $gte: previousMonthStart, $lt: nextMonthStart },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            currentCompleted: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ['$status', BOOKING_STATUS.COMPLETED] },
+                      { $gte: ['$startDate', monthStart] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            currentDecided: {
+              $sum: { $cond: [{ $gte: ['$startDate', monthStart] }, 1, 0] },
+            },
+            previousCompleted: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ['$status', BOOKING_STATUS.COMPLETED] },
+                      { $lt: ['$startDate', monthStart] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+            previousDecided: {
+              $sum: { $cond: [{ $lt: ['$startDate', monthStart] }, 1, 0] },
+            },
+          },
+        },
+      ]),
+    ]);
+
+  const counts = new Map(statusRows.map((row) => [row._id, row.count]));
+  const count = (status) => counts.get(status) || 0;
+  const upcoming = upcomingCount;
+  const completed = count(BOOKING_STATUS.COMPLETED);
+  const cancelled =
+    count(BOOKING_STATUS.CANCELLED) + count(BOOKING_STATUS.DECLINED);
+  const pending =
+    count(BOOKING_STATUS.PENDING) + count(BOOKING_STATUS.AWAITING_HOST_APPROVAL);
+  const total = Array.from(counts.values()).reduce((sum, value) => sum + value, 0);
+  const week = weekRows[0] || { currentWeek: 0, previousWeek: 0 };
+  const customers = customerRows[0] || { total: 0, newThisWeek: 0 };
+  const completion = completionRows[0] || {
+    currentCompleted: 0,
+    currentDecided: 0,
+    previousCompleted: 0,
+    previousDecided: 0,
+  };
+  const allTimeCompletionRate = rate(completed, completed + cancelled);
+  const currentMonthRate = rate(
+    completion.currentCompleted,
+    completion.currentDecided
+  );
+  const previousMonthRate = rate(
+    completion.previousCompleted,
+    completion.previousDecided
+  );
+
+  return {
+    upcoming,
+    completed,
+    cancelled,
+    pending,
+    cards: {
+      totalReservations: {
+        total,
+        currentWeek: week.currentWeek,
+        previousWeek: week.previousWeek,
+        changeFromLastWeek: week.currentWeek - week.previousWeek,
       },
-    }),
-  ]);
-
-  return { upcoming, completed, cancelled, pending };
+      revenue: revenueRows.map((row) => ({
+        currency: row._id,
+        total: row.total,
+        currentMonth: row.currentMonth,
+        previousMonth: row.previousMonth,
+        monthChangePercentage: changePercentage(
+          row.currentMonth,
+          row.previousMonth
+        ),
+      })),
+      activeCustomers: {
+        total: customers.total,
+        newThisWeek: customers.newThisWeek,
+      },
+      completionRate: {
+        rate: allTimeCompletionRate,
+        currentMonthRate,
+        previousMonthRate,
+        changePercentage: Math.round(
+          ((currentMonthRate - previousMonthRate) + Number.EPSILON) * 100
+        ) / 100,
+      },
+    },
+    tabs: { all: total, upcoming, completed, cancelled, pending },
+  };
 }
 
 async function getBookingByIdForUser(bookingId, userId) {
@@ -893,6 +1337,7 @@ module.exports = {
   getBookingQuote,
   getBookingsForGuest,
   getBookingsForHost,
+  exportHostBookingsCsv,
   getHostReservationStats,
   getBookingByIdForUser,
   cancelBooking,
@@ -900,4 +1345,12 @@ module.exports = {
   declineBookingRequest,
   notifyHostOfBookingRequest,
   RESERVATION_TABS,
+  _private: {
+    buildReservationStatusFilter,
+    buildReservationDateFilter,
+    readReservationCounts,
+    startOfUtcWeek,
+    rate,
+    changePercentage,
+  },
 };

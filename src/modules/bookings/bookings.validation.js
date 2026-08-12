@@ -3,6 +3,14 @@ const mongoose = require('mongoose');
 const ApiError = require('../../utils/api-error');
 const { AVAILABLE_BOOKING_TYPES } = require('../../constants/booking');
 
+const HOST_RESERVATION_TABS = [
+  'all',
+  'active',
+  'upcoming',
+  'completed',
+  'cancelled',
+];
+
 function normalizeString(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -35,6 +43,64 @@ function validateBookingId(bookingId) {
     throw new ApiError(400, 'Invalid booking ID.');
   }
   return bookingId;
+}
+
+function parseCalendarDate(value) {
+  const normalized = normalizeString(value);
+  if (!normalized) return null;
+
+  let year;
+  let month;
+  let day;
+  const isoMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(normalized);
+  const displayMatch = /^(\d{2})\/(\d{2})\/(\d{2}|\d{4})$/.exec(normalized);
+  if (isoMatch) {
+    [, year, month, day] = isoMatch;
+  } else if (displayMatch) {
+    [, month, day, year] = displayMatch;
+    if (year.length === 2) year = `20${year}`;
+  } else {
+    throw new ApiError(
+      400,
+      'Date must use YYYY-MM-DD, MM/DD/YY, or MM/DD/YYYY format.'
+    );
+  }
+
+  const parsed = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  if (
+    parsed.getUTCFullYear() !== Number(year) ||
+    parsed.getUTCMonth() !== Number(month) - 1 ||
+    parsed.getUTCDate() !== Number(day)
+  ) {
+    throw new ApiError(400, 'Date is invalid.');
+  }
+
+  return parsed;
+}
+
+function validateHostBookingsQuery(query = {}) {
+  const page = Math.max(1, parseInt(query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 10));
+  const tab = normalizeString(query.tab).toLowerCase() || 'all';
+  if (!HOST_RESERVATION_TABS.includes(tab)) {
+    throw new ApiError(
+      400,
+      `Invalid tab. Allowed values: ${HOST_RESERVATION_TABS.join(', ')}.`
+    );
+  }
+
+  const search = normalizeString(query.search);
+  if (search.length > 100) {
+    throw new ApiError(400, 'Search must be 100 characters or fewer.');
+  }
+
+  return {
+    page,
+    limit,
+    tab,
+    search,
+    date: parseCalendarDate(query.date),
+  };
 }
 
 const AVAILABLE_PRICING_MODES = ['hourly', 'daily'];
@@ -204,4 +270,5 @@ module.exports = {
   validateListingId,
   validateBookingId,
   validateCreateBookingPayload,
+  validateHostBookingsQuery,
 };

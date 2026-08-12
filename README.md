@@ -339,6 +339,68 @@ Notes:
 - `GET /` basic API status
 - `GET /health` API and MongoDB connection status
 
+## Host Dashboard
+
+Frontend developers should start with the complete handoff guide:
+[`docs/FRONTEND_HOST_DASHBOARD_HANDOFF.md`](docs/FRONTEND_HOST_DASHBOARD_HANDOFF.md).
+
+`GET /api/v1/dashboard/host/overview` (host authentication required) supplies
+the dashboard cards and panels in one request. Optional query parameters:
+
+- `recentLimit`: recent reservations to return, default `5`, maximum `20`
+- `currency`: optional three-letter currency such as `USD`
+
+The response includes:
+
+- all-time net earnings per currency, current/previous quarter earnings, and
+  quarter-over-quarter percentage change
+- active listing count and active listings added this month
+- total and pending reservation counts
+- completed count and success rate across decided reservations
+- recent reservations with listing image/category/type and customer details
+- completed, open/pending, and cancelled listing-performance counts/percentages
+- booked and pending utilization counts/percentages, based on all reservations
+
+Use the dashboard overview together with these report endpoints:
+
+- Earnings graph: `GET /api/v1/payments/connect/earnings?range=24h|7d|30d|12m`
+- Transactions: `GET /api/v1/payments/connect/transactions`
+- Full host reservation list: `GET /api/v1/bookings/host`
+- Full host listing list: `GET /api/v1/listings`
+
+## Host Reservation Filters
+
+`GET /api/v1/bookings/host` (host authentication required) supports all controls
+shown on the reservations table:
+
+- `tab`: `all` (default), `upcoming`, `completed`, or `cancelled`
+- `search`: booking ID, listing title/location/category/type, or customer
+  name/email/city
+- `date`: scheduled reservation date in `YYYY-MM-DD`, `MM/DD/YY`, or
+  `MM/DD/YYYY` format; multi-day reservations are included when they overlap
+  the selected date
+- `page`: page number, default `1`
+- `limit`: items per page, default `10`, maximum `100`
+
+Example:
+
+```text
+GET /api/v1/bookings/host?tab=upcoming&search=quad%20bike&date=09/24/2026&page=1&limit=10
+```
+
+The response includes `filters.counts` for the All, Upcoming, Completed, and
+Cancelled tab labels. Search and date filters are reflected in these counts.
+
+`GET /api/v1/bookings/host/stats` returns the four reservation-page cards:
+total reservations with the change from last week, host revenue per currency
+with month-over-month change, unique active customers/new customers this week,
+and the completion rate/month-over-month percentage-point change. It also
+returns the reservation tab counts.
+
+`GET /api/v1/bookings/host/export` downloads up to 10,000 matching reservations
+as UTF-8 CSV. It accepts the same `tab`, `search`, and `date` filters as the list
+endpoint, so the export matches the current table view.
+
 ## Payment Hold, Refund, and Withdrawal Flow
 
 New booking payments use Stripe separate charges and transfers:
@@ -380,6 +442,37 @@ entry per currency:
 
 `pending` is not withdrawable. `current` is the connected account's available
 Stripe balance and is the maximum source for a withdrawal.
+
+### Merchant earnings graph
+
+`GET /api/v1/payments/connect/earnings` (host authentication required) returns
+zero-filled graph points and a summary for each currency. Query parameters:
+
+- `range`: `24h`, `7d` (default), `30d`, or `12m`
+- `currency`: optional three-letter currency such as `USD`
+
+The `24h` range returns hourly points, `7d` and `30d` return daily points, and
+`12m` returns monthly points.
+Earnings use the booking payment date and the host's net `merchantAmount` after
+the platform fee. Pending, available, refunded, and disputed amounts are
+reported separately, and currencies are never added together.
+
+Example: `GET /api/v1/payments/connect/earnings?range=30d&currency=USD`
+
+### Merchant transaction history
+
+`GET /api/v1/payments/connect/transactions` (host authentication required)
+returns a single newest-first history containing booking earnings and bank
+withdrawals. Query parameters:
+
+- `page`: page number, default `1`
+- `limit`: items per page, default `20`, maximum `100`
+- `type`: `all` (default), `earning`, or `withdrawal`
+- `currency`: optional three-letter currency such as `USD`
+
+Each transaction has an `earning`/`withdrawal` type, a `credit`/`debit`
+direction, amount, currency, status, and transaction date. Earning entries also
+include their booking, listing, customer, gross amount, and platform fee.
 
 ### Merchant withdrawal
 

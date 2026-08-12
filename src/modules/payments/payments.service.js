@@ -2,6 +2,7 @@ const stripe = require('../../services/stripe.client');
 const env = require('../../config/env');
 const User = require('../../models/user.model');
 const Booking = require('../../models/booking.model');
+const Listing = require('../../models/listing.model');
 const Withdrawal = require('../../models/withdrawal.model');
 const RefundRequest = require('../../models/refund-request.model');
 const ApiError = require('../../utils/api-error');
@@ -21,6 +22,17 @@ const ZERO_DECIMAL_CURRENCIES = new Set([
   'UGX', 'VND', 'VUV', 'XAF', 'XOF', 'XPF',
 ]);
 const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const EARNING_PAYMENT_STATUSES = [
+  PAYMENT_STATUS.HELD,
+  PAYMENT_STATUS.REFUNDING,
+  PAYMENT_STATUS.RELEASING,
+  PAYMENT_STATUS.RELEASED,
+];
+const EARNING_TRANSACTION_STATUSES = [
+  ...EARNING_PAYMENT_STATUSES,
+  PAYMENT_STATUS.REFUNDED,
+  PAYMENT_STATUS.DISPUTED,
+];
 
 function toStripeAmount(amount, currency) {
   const upper = (currency || 'USD').toUpperCase();
@@ -66,6 +78,128 @@ function calculatePayoutEligibleAt(paidAt, delayDays = env.stripe.payoutDelayDay
 function isPayoutEligible(payoutEligibleAt, now = new Date()) {
   if (!payoutEligibleAt) return false;
   return new Date(payoutEligibleAt).getTime() <= new Date(now).getTime();
+}
+
+function getEarningsWindow(range = '7d', now = new Date()) {
+  const current = now instanceof Date ? new Date(now) : new Date(now);
+  if (Number.isNaN(current.getTime())) {
+    throw new TypeError('A valid date is required to build an earnings window.');
+  }
+
+  if (range === '12m') {
+    return {
+      startDate: new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() - 11, 1)),
+      endDate: new Date(Date.UTC(current.getUTCFullYear(), current.getUTCMonth() + 1, 1)),
+      interval: 'month',
+    };
+  }
+
+  if (range === '24h') {
+    const endDate = new Date(
+      Date.UTC(
+        current.getUTCFullYear(),
+        current.getUTCMonth(),
+        current.getUTCDate(),
+        current.getUTCHours() + 1
+      )
+    );
+    return {
+      startDate: new Date(endDate.getTime() - DAY_IN_MS),
+      endDate,
+      interval: 'hour',
+    };
+  }
+
+  const days = range === '30d' ? 30 : 7;
+  const endDate = new Date(
+    Date.UTC(current.getUTCFullYear(), current.getUTCMonth(), current.getUTCDate() + 1)
+  );
+  return {
+    startDate: new Date(endDate.getTime() - days * DAY_IN_MS),
+    endDate,
+    interval: 'day',
+  };
+}
+
+function getBucketKey(date, interval) {
+  if (interval === 'hour') {
+    return `${date.toISOString().slice(0, 13)}:00:00.000Z`;
+  }
+  return date.toISOString().slice(0, 10);
+}
+
+function buildBucketKeys(startDate, endDate, interval) {
+  const keys = [];
+  const cursor = new Date(startDate);
+
+  while (cursor < endDate) {
+    keys.push(getBucketKey(cursor, interval));
+    if (interval === 'month') {
+      cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+    } else if (interval === 'hour') {
+      cursor.setUTCHours(cursor.getUTCHours() + 1);
+    } else {
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+  }
+
+  return keys;
+}
+
+function emptyEarningsPoint(periodStart) {
+  return {
+    periodStart,
+    grossEarnings: 0,
+    platformFees: 0,
+    netEarnings: 0,
+    pendingEarnings: 0,
+    availableEarnings: 0,
+    refundedEarnings: 0,
+    disputedEarnings: 0,
+    bookingCount: 0,
+    refundCount: 0,
+    disputeCount: 0,
+  };
+}
+
+function normalizeMoney(value) {
+  return Math.round(((Number(value) || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function normalizeEarningsPoint(point) {
+  return {
+    ...point,
+    grossEarnings: normalizeMoney(point.grossEarnings),
+    platformFees: normalizeMoney(point.platformFees),
+    netEarnings: normalizeMoney(point.netEarnings),
+    pendingEarnings: normalizeMoney(point.pendingEarnings),
+    availableEarnings: normalizeMoney(point.availableEarnings),
+    refundedEarnings: normalizeMoney(point.refundedEarnings),
+    disputedEarnings: normalizeMoney(point.disputedEarnings),
+  };
+}
+
+function summarizeEarnings(points) {
+  const summary = emptyEarningsPoint(undefined);
+  delete summary.periodStart;
+
+  for (const point of points) {
+    for (const field of Object.keys(summary)) {
+      summary[field] += Number(point[field]) || 0;
+    }
+  }
+
+  return normalizeEarningsPoint(summary);
+}
+
+function mapEarningStatus(paymentStatus) {
+  if (paymentStatus === PAYMENT_STATUS.HELD) return 'pending';
+  if (paymentStatus === PAYMENT_STATUS.REFUNDING) return 'refunding';
+  if (paymentStatus === PAYMENT_STATUS.RELEASING) return 'processing';
+  if (paymentStatus === PAYMENT_STATUS.RELEASED) return 'available';
+  if (paymentStatus === PAYMENT_STATUS.REFUNDED) return 'refunded';
+  if (paymentStatus === PAYMENT_STATUS.DISPUTED) return 'disputed';
+  return paymentStatus;
 }
 
 function resolveOnboardingReturnUrl(userId) {
@@ -794,6 +928,320 @@ async function refundBooking(bookingId, adminUserId, reason) {
   return refundedBooking.toJSON();
 }
 
+async function getEarningsGraph(userId, { range = '7d', currency = null } = {}) {
+  const generatedAt = new Date();
+  const { startDate, endDate, interval } = getEarningsWindow(range, generatedAt);
+  const hostId =
+    userId instanceof mongoose.Types.ObjectId
+      ? userId
+      : new mongoose.Types.ObjectId(String(userId));
+  const match = {
+    host: hostId,
+    paidAt: { $gte: startDate, $lt: endDate },
+    paymentStatus: { $in: EARNING_TRANSACTION_STATUSES },
+  };
+  if (currency) match.currency = currency;
+
+  const includedEarning = { $in: ['$paymentStatus', EARNING_PAYMENT_STATUSES] };
+  const pendingEarning = {
+    $in: [
+      '$paymentStatus',
+      [PAYMENT_STATUS.HELD, PAYMENT_STATUS.REFUNDING, PAYMENT_STATUS.RELEASING],
+    ],
+  };
+  const availableEarning = { $eq: ['$paymentStatus', PAYMENT_STATUS.RELEASED] };
+  const refundedEarning = { $eq: ['$paymentStatus', PAYMENT_STATUS.REFUNDED] };
+  const disputedEarning = { $eq: ['$paymentStatus', PAYMENT_STATUS.DISPUTED] };
+  const periodFormat =
+    interval === 'month'
+      ? '%Y-%m-01'
+      : interval === 'hour'
+        ? '%Y-%m-%dT%H:00:00.000Z'
+        : '%Y-%m-%d';
+
+  const rows = await Booking.aggregate([
+    { $match: match },
+    {
+      $project: {
+        currency: { $toUpper: { $ifNull: ['$currency', 'USD'] } },
+        periodStart: {
+          $dateToString: {
+            date: '$paidAt',
+            format: periodFormat,
+            timezone: 'UTC',
+          },
+        },
+        paymentStatus: 1,
+        totalAmount: { $ifNull: ['$totalAmount', 0] },
+        applicationFeeAmount: { $ifNull: ['$applicationFeeAmount', 0] },
+        merchantAmount: { $ifNull: ['$merchantAmount', 0] },
+      },
+    },
+    {
+      $group: {
+        _id: { currency: '$currency', periodStart: '$periodStart' },
+        grossEarnings: { $sum: { $cond: [includedEarning, '$totalAmount', 0] } },
+        platformFees: {
+          $sum: { $cond: [includedEarning, '$applicationFeeAmount', 0] },
+        },
+        netEarnings: { $sum: { $cond: [includedEarning, '$merchantAmount', 0] } },
+        pendingEarnings: { $sum: { $cond: [pendingEarning, '$merchantAmount', 0] } },
+        availableEarnings: {
+          $sum: { $cond: [availableEarning, '$merchantAmount', 0] },
+        },
+        refundedEarnings: {
+          $sum: { $cond: [refundedEarning, '$merchantAmount', 0] },
+        },
+        disputedEarnings: {
+          $sum: { $cond: [disputedEarning, '$merchantAmount', 0] },
+        },
+        bookingCount: { $sum: { $cond: [includedEarning, 1, 0] } },
+        refundCount: { $sum: { $cond: [refundedEarning, 1, 0] } },
+        disputeCount: { $sum: { $cond: [disputedEarning, 1, 0] } },
+      },
+    },
+    { $sort: { '_id.currency': 1, '_id.periodStart': 1 } },
+  ]);
+
+  const bucketKeys = buildBucketKeys(startDate, endDate, interval);
+  const rowsByCurrency = new Map();
+  for (const row of rows) {
+    if (!rowsByCurrency.has(row._id.currency)) {
+      rowsByCurrency.set(row._id.currency, new Map());
+    }
+    rowsByCurrency.get(row._id.currency).set(
+      row._id.periodStart,
+      normalizeEarningsPoint({
+        periodStart: row._id.periodStart,
+        grossEarnings: row.grossEarnings,
+        platformFees: row.platformFees,
+        netEarnings: row.netEarnings,
+        pendingEarnings: row.pendingEarnings,
+        availableEarnings: row.availableEarnings,
+        refundedEarnings: row.refundedEarnings,
+        disputedEarnings: row.disputedEarnings,
+        bookingCount: row.bookingCount,
+        refundCount: row.refundCount,
+        disputeCount: row.disputeCount,
+      })
+    );
+  }
+
+  const currencies = currency
+    ? [currency]
+    : Array.from(rowsByCurrency.keys()).sort((a, b) => a.localeCompare(b));
+  const series = currencies.map((currencyCode) => {
+    const currencyRows = rowsByCurrency.get(currencyCode) || new Map();
+    const points = bucketKeys.map(
+      (periodStart) => currencyRows.get(periodStart) || emptyEarningsPoint(periodStart)
+    );
+    return {
+      currency: currencyCode,
+      summary: summarizeEarnings(points),
+      points,
+    };
+  });
+
+  return {
+    range,
+    interval,
+    startDate: startDate.toISOString(),
+    endDate: new Date(endDate.getTime() - 1).toISOString(),
+    generatedAt: generatedAt.toISOString(),
+    series,
+  };
+}
+
+function bookingTransactionProject() {
+  return {
+    _id: 1,
+    transactionType: { $literal: 'earning' },
+    transactionDate: '$paidAt',
+    currency: { $toUpper: { $ifNull: ['$currency', 'USD'] } },
+    amount: { $ifNull: ['$merchantAmount', 0] },
+    grossAmount: { $ifNull: ['$totalAmount', 0] },
+    platformFee: { $ifNull: ['$applicationFeeAmount', 0] },
+    paymentStatus: 1,
+    releasedAt: 1,
+    refundedAt: 1,
+    listing: 1,
+    customer: '$bookedBy',
+  };
+}
+
+function withdrawalTransactionProject() {
+  return {
+    _id: 1,
+    transactionType: { $literal: 'withdrawal' },
+    transactionDate: '$createdAt',
+    currency: { $toUpper: '$currency' },
+    amount: { $ifNull: ['$amount', 0] },
+    status: 1,
+    arrivalDate: 1,
+    paidAt: 1,
+    failedAt: 1,
+    failureReason: 1,
+  };
+}
+
+function buildTransactionPagination(total, page, limit) {
+  const totalPages = Math.ceil(total / limit);
+  return {
+    total,
+    page,
+    limit,
+    totalPages,
+    hasNextPage: page < totalPages,
+    hasPrevPage: page > 1,
+  };
+}
+
+async function listTransactions(
+  userId,
+  { page = 1, limit = 20, type = 'all', currency = null } = {}
+) {
+  const hostId =
+    userId instanceof mongoose.Types.ObjectId
+      ? userId
+      : new mongoose.Types.ObjectId(String(userId));
+  const bookingMatch = {
+    host: hostId,
+    paidAt: { $ne: null },
+    paymentStatus: { $in: EARNING_TRANSACTION_STATUSES },
+  };
+  const withdrawalMatch = { host: hostId };
+  if (currency) {
+    bookingMatch.currency = currency;
+    withdrawalMatch.currency = currency;
+  }
+
+  let model;
+  let pipeline;
+  if (type === 'withdrawal') {
+    model = Withdrawal;
+    pipeline = [
+      { $match: withdrawalMatch },
+      { $project: withdrawalTransactionProject() },
+    ];
+  } else {
+    model = Booking;
+    pipeline = [
+      { $match: bookingMatch },
+      { $project: bookingTransactionProject() },
+    ];
+    if (type === 'all') {
+      pipeline.push({
+        $unionWith: {
+          coll: Withdrawal.collection.name,
+          pipeline: [
+            { $match: withdrawalMatch },
+            { $project: withdrawalTransactionProject() },
+          ],
+        },
+      });
+    }
+  }
+
+  const skip = (page - 1) * limit;
+  pipeline.push(
+    { $sort: { transactionDate: -1, _id: -1 } },
+    {
+      $facet: {
+        transactions: [{ $skip: skip }, { $limit: limit }],
+        metadata: [{ $count: 'total' }],
+      },
+    }
+  );
+
+  const [result = { transactions: [], metadata: [] }] = await model.aggregate(pipeline);
+  const rows = result.transactions || [];
+  const listingIds = rows
+    .filter((row) => row.transactionType === 'earning' && row.listing)
+    .map((row) => row.listing);
+  const customerIds = rows
+    .filter((row) => row.transactionType === 'earning' && row.customer)
+    .map((row) => row.customer);
+  const [listings, customers] = await Promise.all([
+    listingIds.length
+      ? Listing.find({ _id: { $in: listingIds } })
+          .select('basicInformation.activityTitle')
+          .lean()
+      : [],
+    customerIds.length
+      ? User.find({ _id: { $in: customerIds } })
+          .select('email providerProfile.firstName providerProfile.lastName')
+          .lean()
+      : [],
+  ]);
+  const listingsById = new Map(listings.map((listing) => [String(listing._id), listing]));
+  const customersById = new Map(customers.map((customer) => [String(customer._id), customer]));
+
+  const transactions = rows.map((row) => {
+    const id = String(row._id);
+    if (row.transactionType === 'withdrawal') {
+      return {
+        id,
+        type: 'withdrawal',
+        direction: 'debit',
+        status: row.status,
+        amount: normalizeMoney(row.amount),
+        currency: row.currency,
+        description: 'Bank withdrawal',
+        transactionDate: row.transactionDate,
+        withdrawal: {
+          id,
+          arrivalDate: row.arrivalDate || null,
+          paidAt: row.paidAt || null,
+          failedAt: row.failedAt || null,
+          failureReason: row.failureReason || null,
+        },
+      };
+    }
+
+    const listing = row.listing ? listingsById.get(String(row.listing)) : null;
+    const customer = row.customer ? customersById.get(String(row.customer)) : null;
+    const profile = customer && customer.providerProfile;
+    const customerName = profile
+      ? [profile.firstName, profile.lastName].filter(Boolean).join(' ') || null
+      : null;
+    const listingTitle =
+      listing && listing.basicInformation
+        ? listing.basicInformation.activityTitle || null
+        : null;
+
+    return {
+      id,
+      type: 'earning',
+      direction: 'credit',
+      status: mapEarningStatus(row.paymentStatus),
+      amount: normalizeMoney(row.amount),
+      currency: row.currency,
+      description: listingTitle || 'Booking earning',
+      transactionDate: row.transactionDate,
+      booking: {
+        id,
+        grossAmount: normalizeMoney(row.grossAmount),
+        platformFee: normalizeMoney(row.platformFee),
+        paymentStatus: row.paymentStatus,
+        releasedAt: row.releasedAt || null,
+        refundedAt: row.refundedAt || null,
+        listing: listing
+          ? { id: String(listing._id), title: listingTitle }
+          : null,
+        customer: customer
+          ? { id: String(customer._id), name: customerName, email: customer.email }
+          : null,
+      },
+    };
+  });
+
+  const total = result.metadata && result.metadata[0] ? result.metadata[0].total : 0;
+  return {
+    transactions,
+    pagination: buildTransactionPagination(total, page, limit),
+  };
+}
+
 async function getHostConnectAccount(userId, { requirePayouts = false } = {}) {
   const user = await User.findById(userId).select('+stripeConnect');
   if (!user || !user.stripeConnect || !user.stripeConnect.accountId) {
@@ -1357,6 +1805,8 @@ module.exports = {
   refundBooking,
   executeStripeRefund,
   getMerchantBalance,
+  getEarningsGraph,
+  listTransactions,
   createWithdrawal,
   listWithdrawals,
   releaseBookingFunds,
@@ -1374,5 +1824,8 @@ module.exports = {
     calculatePaymentSplit,
     calculatePayoutEligibleAt,
     isPayoutEligible,
+    getEarningsWindow,
+    buildBucketKeys,
+    mapEarningStatus,
   },
 };

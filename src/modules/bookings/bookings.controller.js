@@ -2,6 +2,7 @@ const asyncHandler = require('../../utils/async-handler');
 const {
   validateBookingId,
   validateCreateBookingPayload,
+  validateHostBookingsQuery,
 } = require('./bookings.validation');
 const {
   createBooking,
@@ -9,6 +10,7 @@ const {
   getBookingsForGuest,
   getBookingsForHost,
   getHostReservationStats,
+  exportHostBookingsCsv,
   getBookingByIdForUser,
   cancelBooking,
   acceptBookingRequest,
@@ -55,14 +57,8 @@ const getMyBookingsHandler = asyncHandler(async (req, res) => {
 });
 
 const getHostBookingsHandler = asyncHandler(async (req, res) => {
-  const pagination = parsePaginationQuery(req.query);
-  const { tab, date, search } = req.query;
-  const result = await getBookingsForHost(req.user.id, {
-    ...pagination,
-    tab,
-    date,
-    search,
-  });
+  const query = validateHostBookingsQuery(req.query);
+  const result = await getBookingsForHost(req.user.id, query);
 
   res.status(200).json({
     success: true,
@@ -79,6 +75,20 @@ const getHostReservationStatsHandler = asyncHandler(async (req, res) => {
     message: 'Reservation stats fetched successfully.',
     data: stats,
   });
+});
+
+const exportHostBookingsHandler = asyncHandler(async (req, res) => {
+  const query = validateHostBookingsQuery(req.query);
+  const csv = await exportHostBookingsCsv(req.user.id, query);
+  const fileDate = new Date().toISOString().slice(0, 10);
+
+  res.status(200);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="funsival-reservations-${fileDate}.csv"`
+  );
+  res.send(csv);
 });
 
 const getBookingByIdHandler = asyncHandler(async (req, res) => {
@@ -133,6 +143,7 @@ module.exports = {
   getMyBookingsHandler,
   getHostBookingsHandler,
   getHostReservationStatsHandler,
+  exportHostBookingsHandler,
   getBookingByIdHandler,
   cancelBookingHandler,
   acceptBookingHandler,

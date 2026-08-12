@@ -259,6 +259,7 @@ const bookingSchema = new mongoose.Schema(
 
 bookingSchema.index({ listing: 1, startDate: 1, endDate: 1 });
 bookingSchema.index({ paymentFlow: 1, paymentStatus: 1, payoutEligibleAt: 1 });
+bookingSchema.index({ host: 1, paidAt: -1 });
 
 const Booking = mongoose.model('Booking', bookingSchema);
 

@@ -5,6 +5,8 @@ const paymentsService = require('./payments.service');
 const {
   validateWithdrawalPayload,
   validatePaginationQuery,
+  validateEarningsQuery,
+  validateTransactionsQuery,
 } = require('./payments.validation');
 
 function validateBookingId(bookingId) {
@@ -71,6 +73,26 @@ const listWithdrawalsHandler = asyncHandler(async (req, res) => {
   });
 });
 
+const getEarningsGraphHandler = asyncHandler(async (req, res) => {
+  const query = validateEarningsQuery(req.query);
+  const result = await paymentsService.getEarningsGraph(req.user._id, query);
+  res.status(200).json({
+    success: true,
+    message: 'Earnings graph fetched.',
+    data: result,
+  });
+});
+
+const listTransactionsHandler = asyncHandler(async (req, res) => {
+  const query = validateTransactionsQuery(req.query);
+  const result = await paymentsService.listTransactions(req.user._id, query);
+  res.status(200).json({
+    success: true,
+    message: 'Transaction history fetched.',
+    data: result,
+  });
+});
+
 const authorizeBookingPaymentHandler = asyncHandler(async (req, res) => {
   const bookingId = validateBookingId(req.params.bookingId);
   const paymentMethodId =
@@ -107,6 +129,8 @@ module.exports = {
   getMerchantBalanceHandler,
   createWithdrawalHandler,
   listWithdrawalsHandler,
+  getEarningsGraphHandler,
+  listTransactionsHandler,
   authorizeBookingPaymentHandler,
   refundBookingHandler,
 };

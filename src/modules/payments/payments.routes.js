@@ -35,6 +35,20 @@ router.get(
 );
 
 router.get(
+  '/connect/earnings',
+  authenticate,
+  authorizeRoles(USER_ROLES.HOST),
+  paymentsController.getEarningsGraphHandler
+);
+
+router.get(
+  '/connect/transactions',
+  authenticate,
+  authorizeRoles(USER_ROLES.HOST),
+  paymentsController.listTransactionsHandler
+);
+
+router.get(
   '/connect/withdrawals',
   authenticate,
   authorizeRoles(USER_ROLES.HOST),
