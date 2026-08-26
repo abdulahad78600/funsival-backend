@@ -5,6 +5,7 @@ const { getUploadedListingImages } = require('./listing-images');
 const {
   createListing,
   getListingsForUser,
+  getHostListingStats,
   getListingForUser,
   browseListings,
   getListingById,
@@ -12,6 +13,9 @@ const {
   updateListingForUser,
   deleteListingForUser,
   setListingActiveStatus,
+  getListingsForAdmin,
+  getListingForAdmin,
+  getAdminListingStats,
 } = require('./listings.service');
 
 const uploadListingImagesHandler = asyncHandler(async (req, res) => {
@@ -46,19 +50,30 @@ const createListingHandler = asyncHandler(async (req, res) => {
 const getMyListingsHandler = asyncHandler(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
-  const { status, search } = req.query;
+  const { status, search, category } = req.query;
 
   const result = await getListingsForUser(req.user.id, {
     page,
     limit,
     status,
     search,
+    category,
   });
 
   res.status(200).json({
     success: true,
     message: 'Listings fetched successfully.',
     data: result,
+  });
+});
+
+const getHostListingStatsHandler = asyncHandler(async (req, res) => {
+  const stats = await getHostListingStats(req.user.id);
+
+  res.status(200).json({
+    success: true,
+    message: 'Listing stats fetched successfully.',
+    data: stats,
   });
 });
 
@@ -110,6 +125,7 @@ const browseListingsHandler = asyncHandler(async (req, res) => {
     minPrice,
     maxPrice,
     sort,
+    viewerId: req.user ? req.user.id : null,
   });
 
   res.status(200).json({
@@ -121,7 +137,9 @@ const browseListingsHandler = asyncHandler(async (req, res) => {
 
 const getPublicListingByIdHandler = asyncHandler(async (req, res) => {
   const listingId = validateListingId(req.params.listingId);
-  const listing = await getListingById(listingId);
+  const listing = await getListingById(listingId, {
+    viewerId: req.user ? req.user.id : null,
+  });
 
   res.status(200).json({
     success: true,
@@ -166,10 +184,55 @@ const deleteListingHandler = asyncHandler(async (req, res) => {
   });
 });
 
+const getAdminListingsHandler = asyncHandler(async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+  const { hostId, status, search, category } = req.query;
+
+  const result = await getListingsForAdmin({
+    page,
+    limit,
+    hostId,
+    status,
+    search,
+    category,
+  });
+
+  res.status(200).json({
+    success: true,
+    message: 'Listings fetched successfully.',
+    data: result,
+  });
+});
+
+const getAdminListingStatsHandler = asyncHandler(async (req, res) => {
+  const stats = await getAdminListingStats({ hostId: req.query.hostId });
+
+  res.status(200).json({
+    success: true,
+    message: 'Listing stats fetched successfully.',
+    data: stats,
+  });
+});
+
+const getAdminListingByIdHandler = asyncHandler(async (req, res) => {
+  const listingId = validateListingId(req.params.listingId);
+  const listing = await getListingForAdmin(listingId);
+
+  res.status(200).json({
+    success: true,
+    message: 'Listing fetched successfully.',
+    data: {
+      listing,
+    },
+  });
+});
+
 module.exports = {
   uploadListingImagesHandler,
   createListingHandler,
   getMyListingsHandler,
+  getHostListingStatsHandler,
   getListingByIdHandler,
   browseListingsHandler,
   getPublicListingByIdHandler,
@@ -177,4 +240,7 @@ module.exports = {
   updateListingHandler,
   deleteListingHandler,
   setListingStatusHandler,
+  getAdminListingsHandler,
+  getAdminListingStatsHandler,
+  getAdminListingByIdHandler,
 };

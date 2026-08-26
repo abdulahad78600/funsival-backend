@@ -34,6 +34,32 @@ const authenticate = asyncHandler(async (req, res, next) => {
   next();
 });
 
+// Like `authenticate`, but a missing/invalid token just leaves req.user unset
+// instead of failing — for public endpoints that personalise when signed in.
+const authenticateOptional = asyncHandler(async (req, res, next) => {
+  const authorizationHeader = req.headers.authorization || '';
+  if (!authorizationHeader.startsWith('Bearer ')) {
+    next();
+    return;
+  }
+
+  const token = authorizationHeader.slice(7).trim();
+  if (!token) {
+    next();
+    return;
+  }
+
+  try {
+    const decodedToken = verifyAuthToken(token);
+    const user = await User.findById(decodedToken.sub);
+    if (user) req.user = user;
+  } catch (error) {
+    // Invalid or expired token: treat as anonymous.
+  }
+
+  next();
+});
+
 function authorizeRoles(...allowedRoles) {
   return function authorizeRoleAccess(req, res, next) {
     if (!req.user) {
@@ -52,5 +78,6 @@ function authorizeRoles(...allowedRoles) {
 
 module.exports = {
   authenticate,
+  authenticateOptional,
   authorizeRoles,
 };

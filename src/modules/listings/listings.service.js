@@ -1,8 +1,12 @@
 const mongoose = require('mongoose');
 
 const Listing = require('../../models/listing.model');
+const DraftListing = require('../../models/draft-listing.model');
+const ListingView = require('../../models/listing-view.model');
+const Review = require('../../models/review.model');
 const User = require('../../models/user.model');
 const Booking = require('../../models/booking.model');
+const Wishlist = require('../../models/wishlist.model');
 const ApiError = require('../../utils/api-error');
 const { BOOKING_STATUS, BOOKING_TYPES } = require('../../constants/booking');
 const { validateListingPayload } = require('./listings.validation');
@@ -108,6 +112,30 @@ async function attachReviewSummariesToListings(listings = []) {
   });
 }
 
+// Marks each listing with `isWishlisted` for the signed-in viewer (false when anonymous).
+async function attachWishlistFlags(listings = [], viewerId = null) {
+  if (!Array.isArray(listings) || listings.length === 0) return [];
+  if (!viewerId || !mongoose.Types.ObjectId.isValid(String(viewerId))) {
+    return listings.map((listing) => ({ ...listing, isWishlisted: false }));
+  }
+
+  const listingIds = listings
+    .map((listing) => listing.id || listing._id)
+    .filter((id) => id && mongoose.Types.ObjectId.isValid(String(id)))
+    .map((id) => new mongoose.Types.ObjectId(String(id)));
+
+  const rows = await Wishlist.find({
+    user: new mongoose.Types.ObjectId(String(viewerId)),
+    listing: { $in: listingIds },
+  }).select('listing');
+  const wishlisted = new Set(rows.map((row) => String(row.listing)));
+
+  return listings.map((listing) => ({
+    ...listing,
+    isWishlisted: wishlisted.has(String(listing.id || listing._id)),
+  }));
+}
+
 async function ensureHostStripeConnected(userId) {
   const user = await User.findById(userId).select('+stripeConnect');
   if (!user) {
@@ -143,7 +171,60 @@ async function createListing(payload, userId) {
   return serializedListing;
 }
 
-const LISTING_STATUS_FILTERS = ['all', 'active', 'inactive'];
+const LISTING_STATUS_FILTERS = ['all', 'active', 'inactive', 'draft'];
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function compareTimeStrings(a, b) {
+  return String(a || '').localeCompare(String(b || ''));
+}
+
+// First upcoming availability slot (today or later) — drives the
+// "Availability" column in the listings table.
+function resolveNextAvailability(availability = []) {
+  if (!Array.isArray(availability) || availability.length === 0) return null;
+
+  const todayStart = startOfUtcDay(new Date()).getTime();
+  const upcoming = availability
+    .filter((slot) => {
+      if (!slot || slot.isAvailable === false || !slot.date) return false;
+      const time = new Date(slot.date).getTime();
+      return !Number.isNaN(time) && startOfUtcDay(new Date(time)).getTime() >= todayStart;
+    })
+    .sort((a, b) => {
+      const dateDiff = new Date(a.date).getTime() - new Date(b.date).getTime();
+      return dateDiff !== 0 ? dateDiff : compareTimeStrings(a.startTime, b.startTime);
+    });
+
+  const slot = upcoming[0];
+  if (!slot) return null;
+  return {
+    date: new Date(slot.date).toISOString().slice(0, 10),
+    startTime: slot.startTime,
+    endTime: slot.endTime,
+  };
+}
+
+function serializeHostListing(listing) {
+  const record = serializeListingRecord(listing.toJSON());
+  return {
+    ...record,
+    status: listing.isActive ? 'active' : 'inactive',
+    isDraft: false,
+    nextAvailability: resolveNextAvailability(record.availability),
+  };
+}
+
+function serializeDraftListing(draft) {
+  return {
+    ...serializeListingRecord(draft.toJSON()),
+    status: 'draft',
+    isDraft: true,
+    nextAvailability: null,
+  };
+}
 
 async function buildListingBookingCountMap(listingIds = []) {
   if (!Array.isArray(listingIds) || listingIds.length === 0) {
@@ -177,63 +258,155 @@ async function buildListingBookingCountMap(listingIds = []) {
   return map;
 }
 
-async function getListingsForUser(
-  userId,
-  { page = 1, limit = 10, status, search } = {}
-) {
+const HOST_POPULATE_FIELDS = 'email role agencyName city providerProfile';
+const HOST_SEARCH_FIELDS = ['basicInformation.activityTitle'];
+const ADMIN_SEARCH_FIELDS = [
+  'basicInformation.activityTitle',
+  'basicInformation.location',
+  'placeLocation.city',
+];
+
+function buildPaginationMeta(total, page, limit) {
+  const totalPages = Math.ceil(total / limit);
+  return {
+    total,
+    page,
+    limit,
+    totalPages,
+    hasNextPage: page < totalPages,
+    hasPrevPage: page > 1,
+  };
+}
+
+// Shared by the host "My listings" screen and the admin listings screen.
+// Returns published + draft listings with status, booking counts, ratings,
+// tab totals and pagination. `hostId` scopes to one host; omit it for all hosts.
+async function queryListings({
+  hostId = null,
+  page = 1,
+  limit = 10,
+  status,
+  search,
+  category,
+  populateHost = false,
+  searchFields = HOST_SEARCH_FIELDS,
+} = {}) {
   const skip = (page - 1) * limit;
-  const filter = { createdBy: userId };
 
   const normalizedStatus =
     typeof status === 'string' ? status.trim().toLowerCase() : '';
-  if (normalizedStatus && normalizedStatus !== 'all') {
-    if (!LISTING_STATUS_FILTERS.includes(normalizedStatus)) {
-      throw new ApiError(
-        400,
-        `Invalid status. Allowed values: ${LISTING_STATUS_FILTERS.join(', ')}.`
-      );
-    }
-    filter.isActive = normalizedStatus === 'active';
+  if (normalizedStatus && !LISTING_STATUS_FILTERS.includes(normalizedStatus)) {
+    throw new ApiError(
+      400,
+      `Invalid status. Allowed values: ${LISTING_STATUS_FILTERS.join(', ')}.`
+    );
   }
 
   const trimmedSearch = typeof search === 'string' ? search.trim() : '';
-  if (trimmedSearch) {
-    const regex = new RegExp(
-      trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-      'i'
+  const trimmedCategory = typeof category === 'string' ? category.trim() : '';
+  const searchRegex = trimmedSearch
+    ? new RegExp(escapeRegex(trimmedSearch), 'i')
+    : null;
+  const categoryRegex = trimmedCategory
+    ? new RegExp(`^${escapeRegex(trimmedCategory)}$`, 'i')
+    : null;
+
+  const baseFilter = {};
+  if (hostId) baseFilter.createdBy = hostId;
+  if (searchRegex) {
+    if (searchFields.length === 1) {
+      baseFilter[searchFields[0]] = searchRegex;
+    } else {
+      baseFilter.$or = searchFields.map((field) => ({ [field]: searchRegex }));
+    }
+  }
+  if (categoryRegex) baseFilter.category = categoryRegex;
+
+  const listingFilter = { ...baseFilter };
+  const draftFilter = { ...baseFilter };
+  const withHost = (query) =>
+    populateHost ? query.populate('createdBy', HOST_POPULATE_FIELDS) : query;
+
+  const [activeTotal, inactiveTotal, draftTotal] = await Promise.all([
+    Listing.countDocuments({ ...listingFilter, isActive: true }),
+    Listing.countDocuments({ ...listingFilter, isActive: false }),
+    DraftListing.countDocuments(draftFilter),
+  ]);
+  const tabs = {
+    all: activeTotal + inactiveTotal + draftTotal,
+    active: activeTotal,
+    inactive: inactiveTotal,
+    draft: draftTotal,
+  };
+
+  let total = 0;
+  let items = [];
+
+  if (normalizedStatus === 'draft') {
+    total = draftTotal;
+    const drafts = await withHost(
+      DraftListing.find(draftFilter).sort({ updatedAt: -1 }).skip(skip).limit(limit)
     );
-    filter['basicInformation.activityTitle'] = regex;
+    items = drafts.map(serializeDraftListing);
+  } else if (!normalizedStatus || normalizedStatus === 'all') {
+    // Drafts are listed first, then published listings (newest first).
+    total = tabs.all;
+    const drafts = await withHost(
+      DraftListing.find(draftFilter).sort({ updatedAt: -1 }).skip(skip).limit(limit)
+    );
+    const remaining = limit - drafts.length;
+    const listingSkip = Math.max(0, skip - draftTotal);
+    const listings =
+      remaining > 0
+        ? await withHost(
+            Listing.find(listingFilter)
+              .sort({ createdAt: -1 })
+              .skip(listingSkip)
+              .limit(remaining)
+          )
+        : [];
+    items = [
+      ...drafts.map(serializeDraftListing),
+      ...listings.map(serializeHostListing),
+    ];
+  } else {
+    total = normalizedStatus === 'active' ? activeTotal : inactiveTotal;
+    const listings = await withHost(
+      Listing.find({
+        ...listingFilter,
+        isActive: normalizedStatus === 'active',
+      })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+    );
+    items = listings.map(serializeHostListing);
   }
 
-  const [listings, total] = await Promise.all([
-    Listing.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
-    Listing.countDocuments(filter),
-  ]);
+  const listingsWithReviews = await attachReviewSummariesToListings(items);
 
-  const serializedListings = listings.map((listing) =>
-    serializeListingRecord(listing.toJSON())
-  );
-  const listingsWithReviews = await attachReviewSummariesToListings(serializedListings);
-
-  const listingIds = listingsWithReviews.map((listing) => listing.id).filter(Boolean);
+  const listingIds = listingsWithReviews
+    .filter((listing) => !listing.isDraft)
+    .map((listing) => listing.id)
+    .filter(Boolean);
   const bookingCountMap = await buildListingBookingCountMap(listingIds);
 
   const listingsWithCounts = listingsWithReviews.map((listing) => ({
     ...listing,
-    bookingCount: bookingCountMap.get(String(listing.id)) || 0,
+    bookingCount: listing.isDraft
+      ? 0
+      : bookingCountMap.get(String(listing.id)) || 0,
   }));
 
   return {
     listings: listingsWithCounts,
-    pagination: {
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit),
-      hasNextPage: page < Math.ceil(total / limit),
-      hasPrevPage: page > 1,
-    },
+    tabs,
+    pagination: buildPaginationMeta(total, page, limit),
   };
+}
+
+async function getListingsForUser(userId, options = {}) {
+  return queryListings({ ...options, hostId: userId });
 }
 
 async function setListingActiveStatus(listingId, userId, isActive) {
@@ -275,6 +448,7 @@ async function browseListings({
   minPrice,
   maxPrice,
   sort,
+  viewerId = null,
 } = {}) {
   const skip = (page - 1) * limit;
   const filter = {};
@@ -348,9 +522,10 @@ async function browseListings({
   const totalPages = Math.ceil(total / limit);
 
   const serializedListings = listings.map((listing) => serializeListingRecord(listing.toJSON()));
+  const withReviews = await attachReviewSummariesToListings(serializedListings);
 
   return {
-    listings: await attachReviewSummariesToListings(serializedListings),
+    listings: await attachWishlistFlags(withReviews, viewerId),
     pagination: {
       total,
       page,
@@ -362,7 +537,19 @@ async function browseListings({
   };
 }
 
-async function getListingById(listingId) {
+function recordListingView(listing) {
+  const hostId =
+    listing.createdBy && listing.createdBy._id
+      ? listing.createdBy._id
+      : listing.createdBy;
+  if (!hostId) return;
+
+  ListingView.create({ listing: listing._id, host: hostId }).catch((error) => {
+    console.error('Failed to record listing view.', error);
+  });
+}
+
+async function getListingById(listingId, { viewerId = null } = {}) {
   const listing = await Listing.findById(listingId).populate(
     'createdBy',
     'email role agencyName city'
@@ -372,9 +559,12 @@ async function getListingById(listingId) {
     throw new ApiError(404, 'Listing not found.');
   }
 
-  const [serializedListing] = await attachReviewSummariesToListings([
+  recordListingView(listing);
+
+  const withReviews = await attachReviewSummariesToListings([
     serializeListingRecord(listing.toJSON()),
   ]);
+  const [serializedListing] = await attachWishlistFlags(withReviews, viewerId);
   return serializedListing;
 }
 
@@ -520,6 +710,275 @@ async function getAvailableSlotsForListing(listingId, dateInput) {
   };
 }
 
+function startOfUtcMonth(date, monthOffset = 0) {
+  return new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + monthOffset, 1)
+  );
+}
+
+function startOfUtcQuarter(date, quarterOffset = 0) {
+  const quarterMonth = Math.floor(date.getUTCMonth() / 3) * 3;
+  return new Date(
+    Date.UTC(date.getUTCFullYear(), quarterMonth + quarterOffset * 3, 1)
+  );
+}
+
+function changePercentage(current, previous) {
+  if (previous === 0) return current === 0 ? 0 : null;
+  return (
+    Math.round((((current - previous) / previous) * 100 + Number.EPSILON) * 100) /
+    100
+  );
+}
+
+function averageRating(sum, count) {
+  return count > 0 ? Math.round((sum / count + Number.EPSILON) * 10) / 10 : null;
+}
+
+function sumInPeriod(field, start, end) {
+  return {
+    $sum: {
+      $cond: [
+        { $and: [{ $gte: ['$createdAt', start] }, { $lt: ['$createdAt', end] }] },
+        field,
+        0,
+      ],
+    },
+  };
+}
+
+function toOptionalObjectId(value, label) {
+  if (value === undefined || value === null || value === '') return null;
+  if (value instanceof mongoose.Types.ObjectId) return value;
+  if (!mongoose.Types.ObjectId.isValid(String(value))) {
+    throw new ApiError(400, `Invalid ${label}.`);
+  }
+  return new mongoose.Types.ObjectId(String(value));
+}
+
+// KPI cards (total listings, listing views, total bookings, average rating)
+// plus tab totals. Pass a host ID to scope to one host, or null for all hosts.
+async function buildListingStats(hostId = null) {
+  const now = new Date();
+  const monthStart = startOfUtcMonth(now);
+  const previousMonthStart = startOfUtcMonth(now, -1);
+  const nextMonthStart = startOfUtcMonth(now, 1);
+  const quarterStart = startOfUtcQuarter(now);
+  const previousQuarterStart = startOfUtcQuarter(now, -1);
+  const nextQuarterStart = startOfUtcQuarter(now, 1);
+
+  const [listingRows, draftCount, viewRows, bookingRows, reviewRows] =
+    await Promise.all([
+      Listing.aggregate([
+        { $match: hostId ? { createdBy: hostId } : {} },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            active: { $sum: { $cond: ['$isActive', 1, 0] } },
+            currentQuarter: sumInPeriod(1, quarterStart, nextQuarterStart),
+            previousQuarter: sumInPeriod(1, previousQuarterStart, quarterStart),
+          },
+        },
+      ]),
+      DraftListing.countDocuments(hostId ? { createdBy: hostId } : {}),
+      ListingView.aggregate([
+        { $match: hostId ? { host: hostId } : {} },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            currentMonth: sumInPeriod(1, monthStart, nextMonthStart),
+            previousMonth: sumInPeriod(1, previousMonthStart, monthStart),
+          },
+        },
+      ]),
+      Booking.aggregate([
+        {
+          $match: {
+            ...(hostId ? { host: hostId } : {}),
+            status: {
+              $in: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.COMPLETED],
+            },
+          },
+        },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: 1 },
+            currentMonth: sumInPeriod(1, monthStart, nextMonthStart),
+            previousMonth: sumInPeriod(1, previousMonthStart, monthStart),
+          },
+        },
+      ]),
+      Review.aggregate([
+        { $match: hostId ? { host: hostId } : {} },
+        {
+          $group: {
+            _id: null,
+            totalCount: { $sum: 1 },
+            totalSum: { $sum: '$overallRating' },
+            currentMonthCount: sumInPeriod(1, monthStart, nextMonthStart),
+            currentMonthSum: sumInPeriod(
+              '$overallRating',
+              monthStart,
+              nextMonthStart
+            ),
+            previousMonthCount: sumInPeriod(1, previousMonthStart, monthStart),
+            previousMonthSum: sumInPeriod(
+              '$overallRating',
+              previousMonthStart,
+              monthStart
+            ),
+          },
+        },
+      ]),
+    ]);
+
+  const listingStats = listingRows[0] || {
+    total: 0,
+    active: 0,
+    currentQuarter: 0,
+    previousQuarter: 0,
+  };
+  const viewStats = viewRows[0] || { total: 0, currentMonth: 0, previousMonth: 0 };
+  const bookingStats = bookingRows[0] || {
+    total: 0,
+    currentMonth: 0,
+    previousMonth: 0,
+  };
+  const reviewStats = reviewRows[0] || {
+    totalCount: 0,
+    totalSum: 0,
+    currentMonthCount: 0,
+    currentMonthSum: 0,
+    previousMonthCount: 0,
+    previousMonthSum: 0,
+  };
+
+  const inactiveListings = listingStats.total - listingStats.active;
+  const overallRating = averageRating(reviewStats.totalSum, reviewStats.totalCount);
+  const currentMonthRating = averageRating(
+    reviewStats.currentMonthSum,
+    reviewStats.currentMonthCount
+  );
+  const previousMonthRating = averageRating(
+    reviewStats.previousMonthSum,
+    reviewStats.previousMonthCount
+  );
+  const ratingChange =
+    currentMonthRating !== null && previousMonthRating !== null
+      ? Math.round((currentMonthRating - previousMonthRating + Number.EPSILON) * 10) /
+        10
+      : null;
+
+  return {
+    cards: {
+      totalListings: {
+        total: listingStats.total,
+        currentQuarter: listingStats.currentQuarter,
+        previousQuarter: listingStats.previousQuarter,
+        quarterChangePercentage: changePercentage(
+          listingStats.currentQuarter,
+          listingStats.previousQuarter
+        ),
+      },
+      listingViews: {
+        total: viewStats.total,
+        currentMonth: viewStats.currentMonth,
+        previousMonth: viewStats.previousMonth,
+        monthChangePercentage: changePercentage(
+          viewStats.currentMonth,
+          viewStats.previousMonth
+        ),
+      },
+      totalBookings: {
+        total: bookingStats.total,
+        currentMonth: bookingStats.currentMonth,
+        previousMonth: bookingStats.previousMonth,
+        monthChangePercentage: changePercentage(
+          bookingStats.currentMonth,
+          bookingStats.previousMonth
+        ),
+      },
+      averageRating: {
+        rating: overallRating,
+        reviewCount: reviewStats.totalCount,
+        currentMonthRating,
+        previousMonthRating,
+        changeFromLastMonth: ratingChange,
+      },
+    },
+    tabs: {
+      all: listingStats.total + draftCount,
+      active: listingStats.active,
+      inactive: inactiveListings,
+      draft: draftCount,
+    },
+  };
+}
+
+async function getHostListingStats(userId) {
+  return buildListingStats(toOptionalObjectId(userId, 'host ID'));
+}
+
+async function getAdminListingStats({ hostId } = {}) {
+  return buildListingStats(toOptionalObjectId(hostId, 'host ID'));
+}
+
+async function getListingsForAdmin({ hostId, ...options } = {}) {
+  return queryListings({
+    ...options,
+    hostId: toOptionalObjectId(hostId, 'host ID'),
+    populateHost: true,
+    searchFields: ADMIN_SEARCH_FIELDS,
+  });
+}
+
+async function getListingForAdmin(listingId) {
+  const listing = await Listing.findById(listingId).populate(
+    'createdBy',
+    HOST_POPULATE_FIELDS
+  );
+
+  if (!listing) {
+    throw new ApiError(404, 'Listing not found.');
+  }
+
+  const [withReviews, viewCount, bookingStatusRows] = await Promise.all([
+    attachReviewSummariesToListings([serializeHostListing(listing)]),
+    ListingView.countDocuments({ listing: listing._id }),
+    Booking.aggregate([
+      { $match: { listing: listing._id } },
+      { $group: { _id: '$status', count: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const bookingsByStatus = Object.values(BOOKING_STATUS).reduce(
+    (acc, value) => ({ ...acc, [value]: 0 }),
+    {}
+  );
+  let totalBookings = 0;
+  bookingStatusRows.forEach((row) => {
+    bookingsByStatus[row._id] = row.count;
+    totalBookings += row.count;
+  });
+  const bookingCount =
+    (bookingsByStatus[BOOKING_STATUS.CONFIRMED] || 0) +
+    (bookingsByStatus[BOOKING_STATUS.COMPLETED] || 0);
+
+  return {
+    ...withReviews[0],
+    bookingCount,
+    stats: {
+      viewCount,
+      bookingCount,
+      totalBookings,
+      bookingsByStatus,
+    },
+  };
+}
+
 async function updateListingForUser(listingId, payload, userId) {
   const existingListing = await Listing.findOne({ _id: listingId, createdBy: userId });
 
@@ -556,6 +1015,7 @@ async function deleteListingForUser(listingId, userId) {
 module.exports = {
   createListing,
   getListingsForUser,
+  getHostListingStats,
   getListingForUser,
   browseListings,
   getListingById,
@@ -563,5 +1023,10 @@ module.exports = {
   updateListingForUser,
   deleteListingForUser,
   setListingActiveStatus,
+  getListingsForAdmin,
+  getListingForAdmin,
+  getAdminListingStats,
+  attachReviewSummariesToListings,
+  attachWishlistFlags,
   LISTING_STATUS_FILTERS,
 };

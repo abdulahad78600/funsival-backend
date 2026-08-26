@@ -76,7 +76,15 @@ const draftListingSchema = new mongoose.Schema(
     toJSON: {
       transform: (doc, returnedObject) => {
         returnedObject.id = returnedObject._id.toString();
-        returnedObject.createdBy = returnedObject.createdBy.toString();
+        const createdBy = returnedObject.createdBy;
+        if (!createdBy) {
+          returnedObject.createdBy = null;
+        } else if (typeof createdBy === 'object' && createdBy._id) {
+          returnedObject.createdBy = { ...createdBy, id: createdBy._id.toString() };
+          delete returnedObject.createdBy._id;
+        } else {
+          returnedObject.createdBy = createdBy.toString();
+        }
         delete returnedObject._id;
         return returnedObject;
       },

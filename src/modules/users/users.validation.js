@@ -102,6 +102,7 @@ function validateProviderProfilePayload(payload = {}) {
   const country = validateOptionalString(payload.country, 'country', { maxLength: 100 });
   const businessName = validateOptionalString(payload.businessName, 'businessName', {
     maxLength: 150,
+    allowEmpty: true,
   });
   const businessType = validateOptionalString(payload.businessType, 'businessType', {
     maxLength: 150,

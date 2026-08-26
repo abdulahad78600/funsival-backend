@@ -1,3 +1,4 @@
+const mongoose = require('mongoose');
 const stripe = require('../../services/stripe.client');
 const env = require('../../config/env');
 const User = require('../../models/user.model');
@@ -1052,6 +1053,243 @@ async function getEarningsGraph(userId, { range = '7d', currency = null } = {}) 
   };
 }
 
+// ---------------------------------------------------------------------------
+// Earnings screen: calendar-year trend (Jan–Dec) + revenue by category
+// ---------------------------------------------------------------------------
+
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// Fixed donut buckets matching the Earnings screen legend.
+const REVENUE_CATEGORY_BUCKETS = [
+  { key: 'places', label: 'Places' },
+  { key: 'equipments', label: 'Equipments' },
+  { key: 'services', label: 'Services' },
+];
+
+function resolveRevenueCategoryBucket(category) {
+  const normalized = typeof category === 'string' ? category.trim().toLowerCase() : '';
+  if (normalized === 'place' || normalized === 'places') return 'places';
+  if (normalized === 'equipment' || normalized === 'equipments') return 'equipments';
+  if (
+    normalized === 'service' ||
+    normalized === 'services' ||
+    normalized === 'activity' ||
+    normalized === 'activities'
+  ) {
+    return 'services';
+  }
+  return 'other';
+}
+
+function emptyTrendPoint(year, monthIndex) {
+  return {
+    month: monthIndex + 1,
+    label: MONTH_LABELS[monthIndex],
+    periodStart: `${year}-${String(monthIndex + 1).padStart(2, '0')}-01`,
+    grossEarnings: 0,
+    platformFees: 0,
+    netEarnings: 0,
+    bookingCount: 0,
+  };
+}
+
+function normalizeTrendPoint(point) {
+  return {
+    ...point,
+    grossEarnings: normalizeMoney(point.grossEarnings),
+    platformFees: normalizeMoney(point.platformFees),
+    netEarnings: normalizeMoney(point.netEarnings),
+  };
+}
+
+function sharePercentage(part, total) {
+  if (!total) return 0;
+  return Math.round(((part / total) * 100 + Number.EPSILON) * 100) / 100;
+}
+
+async function getEarningsOverview(userId, { year, currency = null } = {}) {
+  const generatedAt = new Date();
+  const targetYear = Number.isInteger(year) ? year : generatedAt.getUTCFullYear();
+  const startDate = new Date(Date.UTC(targetYear, 0, 1));
+  const endDate = new Date(Date.UTC(targetYear + 1, 0, 1));
+  const hostId =
+    userId instanceof mongoose.Types.ObjectId
+      ? userId
+      : new mongoose.Types.ObjectId(String(userId));
+
+  const match = {
+    host: hostId,
+    paidAt: { $gte: startDate, $lt: endDate },
+    paymentStatus: { $in: EARNING_PAYMENT_STATUSES },
+  };
+  if (currency) match.currency = currency;
+
+  const moneyProject = {
+    currency: { $toUpper: { $ifNull: ['$currency', 'USD'] } },
+    totalAmount: { $ifNull: ['$totalAmount', 0] },
+    applicationFeeAmount: { $ifNull: ['$applicationFeeAmount', 0] },
+    merchantAmount: { $ifNull: ['$merchantAmount', 0] },
+  };
+  const moneyGroup = {
+    grossEarnings: { $sum: '$totalAmount' },
+    platformFees: { $sum: '$applicationFeeAmount' },
+    netEarnings: { $sum: '$merchantAmount' },
+    bookingCount: { $sum: 1 },
+  };
+
+  const [trendRows, categoryRows] = await Promise.all([
+    Booking.aggregate([
+      { $match: match },
+      {
+        $project: {
+          ...moneyProject,
+          month: { $month: { date: '$paidAt', timezone: 'UTC' } },
+        },
+      },
+      { $group: { _id: { currency: '$currency', month: '$month' }, ...moneyGroup } },
+      { $sort: { '_id.currency': 1, '_id.month': 1 } },
+    ]),
+    Booking.aggregate([
+      { $match: match },
+      {
+        $lookup: {
+          from: 'listings',
+          localField: 'listing',
+          foreignField: '_id',
+          as: 'listingDoc',
+        },
+      },
+      {
+        $project: {
+          ...moneyProject,
+          category: {
+            $toLower: {
+              $ifNull: [{ $arrayElemAt: ['$listingDoc.category', 0] }, ''],
+            },
+          },
+        },
+      },
+      { $group: { _id: { currency: '$currency', category: '$category' }, ...moneyGroup } },
+      { $sort: { '_id.currency': 1, '_id.category': 1 } },
+    ]),
+  ]);
+
+  const trendByCurrency = new Map();
+  for (const row of trendRows) {
+    const code = row._id.currency;
+    if (!trendByCurrency.has(code)) trendByCurrency.set(code, new Map());
+    trendByCurrency.get(code).set(row._id.month, row);
+  }
+
+  const categoryByCurrency = new Map();
+  for (const row of categoryRows) {
+    const code = row._id.currency;
+    if (!categoryByCurrency.has(code)) categoryByCurrency.set(code, new Map());
+    const bucketKey = resolveRevenueCategoryBucket(row._id.category);
+    const buckets = categoryByCurrency.get(code);
+    const bucket = buckets.get(bucketKey) || {
+      grossEarnings: 0,
+      platformFees: 0,
+      netEarnings: 0,
+      bookingCount: 0,
+    };
+    bucket.grossEarnings += row.grossEarnings;
+    bucket.platformFees += row.platformFees;
+    bucket.netEarnings += row.netEarnings;
+    bucket.bookingCount += row.bookingCount;
+    buckets.set(bucketKey, bucket);
+  }
+
+  const currencyCodes = currency
+    ? [currency]
+    : Array.from(new Set([...trendByCurrency.keys(), ...categoryByCurrency.keys()])).sort(
+        (a, b) => a.localeCompare(b)
+      );
+
+  const trendSeries = currencyCodes.map((code) => {
+    const rowsByMonth = trendByCurrency.get(code) || new Map();
+    const points = MONTH_LABELS.map((_, index) => {
+      const row = rowsByMonth.get(index + 1);
+      const base = emptyTrendPoint(targetYear, index);
+      return normalizeTrendPoint(
+        row
+          ? {
+              ...base,
+              grossEarnings: row.grossEarnings,
+              platformFees: row.platformFees,
+              netEarnings: row.netEarnings,
+              bookingCount: row.bookingCount,
+            }
+          : base
+      );
+    });
+    const summary = normalizeTrendPoint(
+      points.reduce(
+        (acc, point) => ({
+          grossEarnings: acc.grossEarnings + point.grossEarnings,
+          platformFees: acc.platformFees + point.platformFees,
+          netEarnings: acc.netEarnings + point.netEarnings,
+          bookingCount: acc.bookingCount + point.bookingCount,
+        }),
+        { grossEarnings: 0, platformFees: 0, netEarnings: 0, bookingCount: 0 }
+      )
+    );
+    const peak = points.reduce(
+      (best, point) => (point.netEarnings > best.netEarnings ? point : best),
+      points[0]
+    );
+    return {
+      currency: code,
+      summary,
+      peakMonth: peak.netEarnings > 0 ? { month: peak.month, label: peak.label, netEarnings: peak.netEarnings } : null,
+      points,
+    };
+  });
+
+  const categorySeries = currencyCodes.map((code) => {
+    const buckets = categoryByCurrency.get(code) || new Map();
+    const bucketKeys = [
+      ...REVENUE_CATEGORY_BUCKETS,
+      ...(buckets.has('other') ? [{ key: 'other', label: 'Other' }] : []),
+    ];
+    const total = Array.from(buckets.values()).reduce(
+      (sum, bucket) => sum + bucket.netEarnings,
+      0
+    );
+    const categories = bucketKeys.map(({ key, label }) => {
+      const bucket = buckets.get(key) || {
+        grossEarnings: 0,
+        platformFees: 0,
+        netEarnings: 0,
+        bookingCount: 0,
+      };
+      return {
+        key,
+        label,
+        grossEarnings: normalizeMoney(bucket.grossEarnings),
+        platformFees: normalizeMoney(bucket.platformFees),
+        netEarnings: normalizeMoney(bucket.netEarnings),
+        bookingCount: bucket.bookingCount,
+        percentage: sharePercentage(bucket.netEarnings, total),
+      };
+    });
+    return {
+      currency: code,
+      total: normalizeMoney(total),
+      categories,
+    };
+  });
+
+  return {
+    year: targetYear,
+    startDate: startDate.toISOString(),
+    endDate: new Date(endDate.getTime() - 1).toISOString(),
+    generatedAt: generatedAt.toISOString(),
+    trend: { interval: 'month', series: trendSeries },
+    revenueByCategory: { series: categorySeries },
+  };
+}
+
 function bookingTransactionProject() {
   return {
     _id: 1,
@@ -1806,6 +2044,7 @@ module.exports = {
   executeStripeRefund,
   getMerchantBalance,
   getEarningsGraph,
+  getEarningsOverview,
   listTransactions,
   createWithdrawal,
   listWithdrawals,
@@ -1827,5 +2066,6 @@ module.exports = {
     getEarningsWindow,
     buildBucketKeys,
     mapEarningStatus,
+    resolveRevenueCategoryBucket,
   },
 };

@@ -6,6 +6,7 @@ const {
   validateWithdrawalPayload,
   validatePaginationQuery,
   validateEarningsQuery,
+  validateEarningsOverviewQuery,
   validateTransactionsQuery,
 } = require('./payments.validation');
 
@@ -83,6 +84,16 @@ const getEarningsGraphHandler = asyncHandler(async (req, res) => {
   });
 });
 
+const getEarningsOverviewHandler = asyncHandler(async (req, res) => {
+  const query = validateEarningsOverviewQuery(req.query);
+  const result = await paymentsService.getEarningsOverview(req.user._id, query);
+  res.status(200).json({
+    success: true,
+    message: 'Earnings overview fetched.',
+    data: result,
+  });
+});
+
 const listTransactionsHandler = asyncHandler(async (req, res) => {
   const query = validateTransactionsQuery(req.query);
   const result = await paymentsService.listTransactions(req.user._id, query);
@@ -130,6 +141,7 @@ module.exports = {
   createWithdrawalHandler,
   listWithdrawalsHandler,
   getEarningsGraphHandler,
+  getEarningsOverviewHandler,
   listTransactionsHandler,
   authorizeBookingPaymentHandler,
   refundBookingHandler,

@@ -6,6 +6,8 @@ const {
   updateProviderProfile,
   updateUserProfile,
   updateUserProfileImage,
+  listUsersForAdmin,
+  getUserForAdmin,
 } = require('./users.service');
 
 const savePreferencesHandler = asyncHandler(async (req, res) => {
@@ -59,9 +61,35 @@ const uploadProfilePictureHandler = asyncHandler(async (req, res) => {
   });
 });
 
+const listAdminUsersHandler = asyncHandler(async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+  const { role, search } = req.query;
+
+  const result = await listUsersForAdmin({ page, limit, role, search });
+
+  res.status(200).json({
+    success: true,
+    message: 'Users fetched successfully.',
+    data: result,
+  });
+});
+
+const getAdminUserHandler = asyncHandler(async (req, res) => {
+  const user = await getUserForAdmin(req.params.userId);
+
+  res.status(200).json({
+    success: true,
+    message: 'User fetched successfully.',
+    data: { user },
+  });
+});
+
 module.exports = {
   savePreferencesHandler,
   updateProviderProfileHandler,
   updateUserProfileHandler,
   uploadProfilePictureHandler,
+  listAdminUsersHandler,
+  getAdminUserHandler,
 };

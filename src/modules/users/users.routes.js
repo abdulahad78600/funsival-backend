@@ -8,6 +8,8 @@ const {
   updateProviderProfileHandler,
   updateUserProfileHandler,
   uploadProfilePictureHandler,
+  listAdminUsersHandler,
+  getAdminUserHandler,
 } = require('./users.controller');
 
 const router = express.Router();
@@ -31,4 +33,12 @@ router.post(
   uploadProfilePictureHandler
 );
 
+// Admin: every user on the platform with their details
+const adminRouter = express.Router();
+adminRouter.use(authenticate);
+adminRouter.use(authorizeRoles(USER_ROLES.ADMIN));
+adminRouter.get('/', listAdminUsersHandler);
+adminRouter.get('/:userId', getAdminUserHandler);
+
 module.exports = router;
+module.exports.adminRouter = adminRouter;

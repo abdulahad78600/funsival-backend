@@ -42,6 +42,13 @@ router.get(
 );
 
 router.get(
+  '/connect/earnings/overview',
+  authenticate,
+  authorizeRoles(USER_ROLES.HOST),
+  paymentsController.getEarningsOverviewHandler
+);
+
+router.get(
   '/connect/transactions',
   authenticate,
   authorizeRoles(USER_ROLES.HOST),

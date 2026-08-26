@@ -7,6 +7,7 @@ const {
 const {
   getBookingReviewContext,
   submitBookingReview,
+  deleteBookingReview,
   listListingReviews,
   listHostReviews,
 } = require('./reviews.service');
@@ -30,6 +31,17 @@ const submitBookingReviewHandler = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Review submitted successfully.',
+    data: result,
+  });
+});
+
+const deleteBookingReviewHandler = asyncHandler(async (req, res) => {
+  const bookingId = validateObjectId(req.params.bookingId, 'booking ID');
+  const result = await deleteBookingReview(bookingId, req.user._id);
+
+  res.status(200).json({
+    success: true,
+    message: 'Review deleted successfully.',
     data: result,
   });
 });
@@ -61,6 +73,7 @@ const listHostReviewsHandler = asyncHandler(async (req, res) => {
 module.exports = {
   getMyBookingReviewHandler,
   submitBookingReviewHandler,
+  deleteBookingReviewHandler,
   listListingReviewsHandler,
   listHostReviewsHandler,
 };

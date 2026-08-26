@@ -39,6 +39,32 @@ function buildReviewSummaryFromAggregate(row) {
   };
 }
 
+// 5★…1★ counts + percentages for the reviews header bars.
+function buildEmptyRatingDistribution() {
+  return [5, 4, 3, 2, 1].map((stars) => ({ stars, count: 0, percentage: 0 }));
+}
+
+function buildRatingDistribution(rows = []) {
+  const counts = new Map(rows.map((row) => [Number(row._id), row.count || 0]));
+  const total = Array.from(counts.values()).reduce((sum, count) => sum + count, 0);
+  return [5, 4, 3, 2, 1].map((stars) => {
+    const count = counts.get(stars) || 0;
+    return {
+      stars,
+      count,
+      percentage: total ? Math.round(((count / total) * 100 + Number.EPSILON) * 10) / 10 : 0,
+    };
+  });
+}
+
+async function getRatingDistribution(field, id) {
+  const rows = await Review.aggregate([
+    { $match: { [field]: id } },
+    { $group: { _id: { $round: ['$overallRating', 0] }, count: { $sum: 1 } } },
+  ]);
+  return buildRatingDistribution(rows);
+}
+
 function extractId(value) {
   if (!value) return '';
   if (typeof value === 'string') return value;
@@ -313,6 +339,27 @@ async function submitBookingReview(bookingId, userId, payload) {
   };
 }
 
+async function deleteBookingReview(bookingId, userId) {
+  const booking = await loadBookingForReview(bookingId);
+
+  if (extractId(booking.bookedBy) !== userId.toString()) {
+    throw new ApiError(403, 'You are not allowed to review this booking.');
+  }
+
+  const review = await Review.findOneAndDelete({ booking: booking._id, reviewer: userId });
+  if (!review) {
+    throw new ApiError(404, 'Review not found.');
+  }
+
+  return {
+    ...serializeBookingReviewContext(booking),
+    reviewStatus: buildReviewStatus(booking, userId, null),
+    review: null,
+    listingReviewSummary: await getListingReviewSummary(booking.listing._id || booking.listing),
+    hostReviewSummary: await getHostReviewSummary(booking.host._id || booking.host),
+  };
+}
+
 async function listListingReviews(listingId, { page = 1, limit = 10 } = {}) {
   const listing = await Listing.findById(listingId).populate(
     'createdBy',
@@ -326,7 +373,7 @@ async function listListingReviews(listingId, { page = 1, limit = 10 } = {}) {
   const skip = (page - 1) * limit;
   const filter = { listing: listing._id };
 
-  const [reviews, total, summary] = await Promise.all([
+  const [reviews, total, summary, distribution] = await Promise.all([
     Review.find(filter)
       .populate('reviewer', 'email role agencyName city providerProfile')
       .sort({ createdAt: -1 })
@@ -334,11 +381,12 @@ async function listListingReviews(listingId, { page = 1, limit = 10 } = {}) {
       .limit(limit),
     Review.countDocuments(filter),
     getListingReviewSummary(listing._id),
+    getRatingDistribution('listing', listing._id),
   ]);
 
   return {
     listing: serializeListingRecord(listing.toJSON()),
-    summary,
+    summary: { ...summary, distribution },
     reviews: reviews.map((review) => serializeReview(review)),
     pagination: buildPagination(total, page, limit),
   };
@@ -354,7 +402,7 @@ async function listHostReviews(hostId, { page = 1, limit = 10 } = {}) {
   const skip = (page - 1) * limit;
   const filter = { host: host._id };
 
-  const [reviews, total, summary] = await Promise.all([
+  const [reviews, total, summary, distribution] = await Promise.all([
     Review.find(filter)
       .populate('reviewer', 'email role agencyName city providerProfile')
       .populate('listing')
@@ -363,11 +411,12 @@ async function listHostReviews(hostId, { page = 1, limit = 10 } = {}) {
       .limit(limit),
     Review.countDocuments(filter),
     getHostReviewSummary(host._id),
+    getRatingDistribution('host', host._id),
   ]);
 
   return {
     host: serializeUserSummary(host),
-    summary,
+    summary: { ...summary, distribution },
     reviews: reviews.map((review) => {
       const serializedReview = serializeReview(review);
       return {
@@ -393,6 +442,12 @@ module.exports = {
   attachReviewDataToBookings,
   getBookingReviewContext,
   submitBookingReview,
+  deleteBookingReview,
   listListingReviews,
   listHostReviews,
+  _private: {
+    isBookingReviewable,
+    buildReviewStatus,
+    buildRatingDistribution,
+  },
 };

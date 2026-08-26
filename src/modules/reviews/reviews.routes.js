@@ -23,4 +23,11 @@ router.post(
   reviewsController.submitBookingReviewHandler
 );
 
+router.delete(
+  '/bookings/:bookingId',
+  authenticate,
+  authorizeRoles(USER_ROLES.USER),
+  reviewsController.deleteBookingReviewHandler
+);
+
 module.exports = router;

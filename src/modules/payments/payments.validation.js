@@ -60,6 +60,23 @@ function validateEarningsQuery(query = {}) {
   };
 }
 
+function validateEarningsOverviewQuery(query = {}, now = new Date()) {
+  const currentYear = now.getUTCFullYear();
+  const rawYear = typeof query.year === 'string' ? query.year.trim() : query.year;
+  const year =
+    rawYear === undefined || rawYear === null || rawYear === ''
+      ? currentYear
+      : Number.parseInt(rawYear, 10);
+  if (!Number.isInteger(year) || year < 2000 || year > currentYear + 1) {
+    throw new ApiError(400, `Invalid year. Expected a value between 2000 and ${currentYear + 1}.`);
+  }
+
+  return {
+    year,
+    currency: normalizeCurrency(query.currency),
+  };
+}
+
 function validateTransactionsQuery(query = {}) {
   const pagination = validatePaginationQuery(query);
   const requestedType =
@@ -88,5 +105,6 @@ module.exports = {
   validateWithdrawalPayload,
   validatePaginationQuery,
   validateEarningsQuery,
+  validateEarningsOverviewQuery,
   validateTransactionsQuery,
 };
