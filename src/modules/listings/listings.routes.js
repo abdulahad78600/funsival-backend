@@ -31,6 +31,9 @@ router.post(
 
 // Browse all hosts' listings (public)
 router.get('/browse', authenticateOptional, listingsController.browseListingsHandler);
+// Landing page sections — must stay above /browse/:listingId
+router.get('/browse/types', listingsController.getBrowseTypesHandler);
+router.get('/browse/destinations', listingsController.getBrowseDestinationsHandler);
 router.get(
   '/browse/:listingId/slots',
   listingsController.getListingSlotsHandler

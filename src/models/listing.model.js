@@ -52,11 +52,7 @@ const serviceDetailsSchema = new mongoose.Schema(
     },
     requirements: {
       type: [String],
-      required: true,
-      validate: {
-        validator: (value) => Array.isArray(value) && value.length > 0,
-        message: 'At least one requirement is required.',
-      },
+      default: [],
     },
   },
   { _id: false }

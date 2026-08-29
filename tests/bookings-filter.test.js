@@ -63,6 +63,99 @@ test('reservation status tabs map to the expected booking states', () => {
   });
 });
 
+test('guest reservation tabs accept UI labels and aliases', () => {
+  const { validateGuestBookingsQuery } = require('../src/modules/bookings/bookings.validation');
+
+  assert.equal(validateGuestBookingsQuery({}).tab, 'all');
+  for (const tab of ['all', 'in_progress', 'completed', 'cancelled']) {
+    assert.equal(validateGuestBookingsQuery({ tab }).tab, tab);
+  }
+  assert.equal(validateGuestBookingsQuery({ tab: 'In-Progress' }).tab, 'in_progress');
+  assert.equal(validateGuestBookingsQuery({ tab: 'inprogress' }).tab, 'in_progress');
+  assert.equal(validateGuestBookingsQuery({ tab: 'in progress' }).tab, 'in_progress');
+  assert.throws(() => validateGuestBookingsQuery({ tab: 'upcoming' }), /Invalid tab/);
+});
+
+test('guest reservation tabs map to booking states', () => {
+  const { buildGuestReservationStatusFilter } = bookingsService._private;
+
+  assert.equal(buildGuestReservationStatusFilter('all'), null);
+  assert.deepEqual(buildGuestReservationStatusFilter('in_progress'), {
+    status: { $in: ['pending', 'awaiting_host_approval', 'confirmed'] },
+  });
+  assert.deepEqual(buildGuestReservationStatusFilter('completed'), { status: 'completed' });
+  assert.deepEqual(buildGuestReservationStatusFilter('cancelled'), {
+    status: { $in: ['cancelled', 'declined'] },
+  });
+});
+
+test('guest reservation list applies the tab filter and returns tab counts', async () => {
+  const mongoose = require('mongoose');
+  const Booking = require('../src/models/booking.model');
+  const paymentsService = require('../src/modules/payments/payments.service');
+  const originalFind = Booking.find;
+  const originalAggregate = Booking.aggregate;
+  const originalReconcile = paymentsService.reconcileProcessingBookings;
+  const guestId = new mongoose.Types.ObjectId();
+  let bookingFilter;
+  let countPipeline;
+
+  Booking.find = (filter) => {
+    bookingFilter = filter;
+    return {
+      populate() { return this; },
+      sort() { return this; },
+      skip() { return this; },
+      limit() { return this; },
+      then(resolve) { resolve([]); },
+    };
+  };
+  Booking.aggregate = async (pipeline) => {
+    countPipeline = pipeline;
+    return [{
+      all: [{ count: 5 }],
+      in_progress: [{ count: 2 }],
+      completed: [{ count: 2 }],
+      cancelled: [{ count: 1 }],
+    }];
+  };
+  paymentsService.reconcileProcessingBookings = async () => {};
+
+  try {
+    const result = await bookingsService.getBookingsForGuest(guestId.toString(), {
+      tab: 'in_progress',
+      page: 1,
+      limit: 10,
+    });
+
+    assert.deepEqual(bookingFilter, {
+      $and: [
+        { bookedBy: guestId },
+        { status: { $in: ['pending', 'awaiting_host_approval', 'confirmed'] } },
+      ],
+    });
+    assert.deepEqual(countPipeline[0].$match, { bookedBy: guestId });
+    assert.deepEqual(Object.keys(countPipeline[1].$facet), ['all', 'in_progress', 'completed', 'cancelled']);
+    assert.deepEqual(result.filters, {
+      tab: 'in_progress',
+      counts: { all: 5, in_progress: 2, completed: 2, cancelled: 1 },
+    });
+    assert.equal(result.pagination.total, 2);
+
+    await bookingsService.getBookingsForGuest(guestId.toString(), { tab: 'all' });
+    assert.deepEqual(bookingFilter, { bookedBy: guestId });
+
+    await assert.rejects(
+      () => bookingsService.getBookingsForGuest(guestId.toString(), { tab: 'upcoming' }),
+      /Invalid tab/
+    );
+  } finally {
+    Booking.find = originalFind;
+    Booking.aggregate = originalAggregate;
+    paymentsService.reconcileProcessingBookings = originalReconcile;
+  }
+});
+
 test('host reservation list combines tab, search, and date filters with tab counts', async () => {
   const Booking = require('../src/models/booking.model');
   const Listing = require('../src/models/listing.model');

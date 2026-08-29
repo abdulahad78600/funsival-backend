@@ -263,7 +263,8 @@ const userSchema = new mongoose.Schema(
       transform: (doc, returnedObject) => {
         returnedObject.id = returnedObject._id.toString();
         delete returnedObject._id;
-        delete returnedObject.authProviders;
+        // authProviders is intentionally kept: the client uses it to show
+        // how the account was created (signup form vs Google) and what's linked.
         delete returnedObject.googleId;
         delete returnedObject.password;
         delete returnedObject.isEmailVerified;

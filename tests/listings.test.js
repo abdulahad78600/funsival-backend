@@ -20,6 +20,45 @@ function chainableQuery(result) {
   return query;
 }
 
+test('public browse, detail, and slots only expose active listings', async () => {
+  const originalFind = Listing.find;
+  const originalCount = Listing.countDocuments;
+  const originalFindOne = Listing.findOne;
+  const filters = {};
+
+  Listing.find = (filter) => {
+    filters.browse = filter;
+    return chainableQuery([]);
+  };
+  Listing.countDocuments = async () => 0;
+  Listing.findOne = (filter) => {
+    filters.findOne = filter;
+    return chainableQuery(null);
+  };
+
+  try {
+    const result = await listingsService.browseListings({ hostId: 'h1', search: 'cave' });
+    assert.equal(filters.browse.isActive, true);
+    assert.equal(filters.browse.createdBy, 'h1');
+    assert.deepEqual(result.listings, []);
+
+    const id = new mongoose.Types.ObjectId().toString();
+    await assert.rejects(() => listingsService.getListingById(id), /Listing not found/);
+    assert.deepEqual(filters.findOne, { _id: id, isActive: true });
+
+    filters.findOne = undefined;
+    await assert.rejects(
+      () => listingsService.getAvailableSlotsForListing(id, '2026-09-01'),
+      /Listing not found/
+    );
+    assert.deepEqual(filters.findOne, { _id: id, isActive: true });
+  } finally {
+    Listing.find = originalFind;
+    Listing.countDocuments = originalCount;
+    Listing.findOne = originalFindOne;
+  }
+});
+
 test('host listing stats supply all four KPI cards and tab totals', async () => {
   const originalListingAggregate = Listing.aggregate;
   const originalDraftCount = DraftListing.countDocuments;

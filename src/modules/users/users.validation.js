@@ -1,4 +1,5 @@
 const ApiError = require('../../utils/api-error');
+const { AVAILABLE_ROLES } = require('../../constants/roles');
 
 function normalizeString(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -169,7 +170,61 @@ function validateUserProfilePayload(payload = {}) {
   return validatedPayload;
 }
 
+function validateOptionalBoolean(value, fieldName) {
+  if (value === undefined) return undefined;
+
+  if (typeof value === 'boolean') return value;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+
+  throw new ApiError(400, 'Validation failed.', {
+    [fieldName]: `${fieldName} must be a boolean.`,
+  });
+}
+
+function validateOptionalRole(value, fieldName) {
+  if (value === undefined) return undefined;
+
+  const normalizedValue = normalizeString(value).toLowerCase();
+
+  if (!AVAILABLE_ROLES.includes(normalizedValue)) {
+    throw new ApiError(400, 'Validation failed.', {
+      [fieldName]: `${fieldName} must be one of: ${AVAILABLE_ROLES.join(', ')}.`,
+    });
+  }
+
+  return normalizedValue;
+}
+
+// Admin edit: everything a host can change on their own profile, plus
+// account-level fields only an admin should touch.
+function validateAdminUserUpdatePayload(payload = {}) {
+  const validatedPayload = validateProviderProfilePayload(payload);
+
+  const role = validateOptionalRole(payload.role, 'role');
+  const agencyName = validateOptionalString(payload.agencyName, 'agencyName', {
+    maxLength: 150,
+    allowEmpty: true,
+  });
+  const isEmailVerified = validateOptionalBoolean(payload.isEmailVerified, 'isEmailVerified');
+  const twoFactorEnabled = validateOptionalBoolean(payload.twoFactorEnabled, 'twoFactorEnabled');
+
+  if (role !== undefined) validatedPayload.role = role;
+  if (agencyName !== undefined) validatedPayload.agencyName = agencyName;
+  if (isEmailVerified !== undefined) validatedPayload.isEmailVerified = isEmailVerified;
+  if (twoFactorEnabled !== undefined) validatedPayload.twoFactorEnabled = twoFactorEnabled;
+
+  if (Object.keys(validatedPayload).length === 0) {
+    throw new ApiError(400, 'Validation failed.', {
+      payload: 'At least one field is required to update the user.',
+    });
+  }
+
+  return validatedPayload;
+}
+
 module.exports = {
   validateProviderProfilePayload,
   validateUserProfilePayload,
+  validateAdminUserUpdatePayload,
 };

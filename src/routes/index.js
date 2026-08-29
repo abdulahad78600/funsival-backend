@@ -12,6 +12,8 @@ const reviewsRoutes = require('../modules/reviews/reviews.routes');
 const dashboardRoutes = require('../modules/dashboard/dashboard.routes');
 const wishlistsRoutes = require('../modules/wishlists/wishlists.routes');
 const { guestRouter: refundsGuestRouter, adminRouter: refundsAdminRouter } = require('../modules/refunds/refunds.routes');
+const faqsRoutes = require('../modules/faqs/faqs.routes');
+const newsletterRoutes = require('../modules/newsletter/newsletter.routes');
 
 const router = express.Router();
 
@@ -27,8 +29,12 @@ router.use('/payments/cards', cardsRoutes);
 router.use('/reviews', reviewsRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/wishlist', wishlistsRoutes);
+router.use('/faqs', faqsRoutes);
+router.use('/newsletter', newsletterRoutes);
 router.use('/admin/refund-requests', refundsAdminRouter);
 router.use('/admin/listings', listingsRoutes.adminRouter);
 router.use('/admin/users', usersRoutes.adminRouter);
+router.use('/admin/faqs', faqsRoutes.adminRouter);
+router.use('/admin/newsletter', newsletterRoutes.adminRouter);
 
 module.exports = router;

@@ -10,6 +10,8 @@ const {
   uploadProfilePictureHandler,
   listAdminUsersHandler,
   getAdminUserHandler,
+  updateAdminUserHandler,
+  deleteAdminUserHandler,
 } = require('./users.controller');
 
 const router = express.Router();
@@ -33,12 +35,14 @@ router.post(
   uploadProfilePictureHandler
 );
 
-// Admin: every user on the platform with their details
+// Admin: list / view / edit / delete platform users
 const adminRouter = express.Router();
 adminRouter.use(authenticate);
 adminRouter.use(authorizeRoles(USER_ROLES.ADMIN));
 adminRouter.get('/', listAdminUsersHandler);
 adminRouter.get('/:userId', getAdminUserHandler);
+adminRouter.patch('/:userId', updateAdminUserHandler);
+adminRouter.delete('/:userId', deleteAdminUserHandler);
 
 module.exports = router;
 module.exports.adminRouter = adminRouter;

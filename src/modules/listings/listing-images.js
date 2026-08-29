@@ -233,6 +233,7 @@ module.exports = {
   uploadListingImages,
   normalizeListingPhotoReference,
   serializeListingRecord,
+  buildListingImagePublicUrl,
   findUnusedLocalListingPhotos,
   deleteLocalListingPhotos,
   getUploadedListingImages,

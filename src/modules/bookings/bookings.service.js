@@ -467,6 +467,9 @@ async function buildBookingQuote(payload, userId) {
   if (!listing) {
     throw new ApiError(404, 'Listing not found.');
   }
+  if (!listing.isActive) {
+    throw new ApiError(400, 'This listing is currently inactive and cannot be booked.');
+  }
   if (listing.createdBy.toString() === userId.toString()) {
     throw new ApiError(400, 'You cannot book your own listing.');
   }
@@ -620,27 +623,88 @@ async function declineBookingRequest(bookingId, hostUserId, reason) {
   return booking.toJSON();
 }
 
-async function getBookingsForGuest(userId, { page = 1, limit = 10 } = {}) {
-  const skip = (page - 1) * limit;
-  const filter = { bookedBy: userId };
+// Guest "My Reservations" tabs. "In progress" is anything the guest is still
+// waiting on or attending: not yet finished, not cancelled/declined.
+const GUEST_RESERVATION_TABS = ['all', 'in_progress', 'completed', 'cancelled'];
+const IN_PROGRESS_STATUSES = [
+  BOOKING_STATUS.PENDING,
+  BOOKING_STATUS.AWAITING_HOST_APPROVAL,
+  BOOKING_STATUS.CONFIRMED,
+];
 
-  const [bookings, total] = await Promise.all([
+function buildGuestReservationStatusFilter(tab) {
+  switch (tab) {
+    case 'in_progress':
+      return { status: { $in: IN_PROGRESS_STATUSES } };
+    case 'completed':
+      return { status: BOOKING_STATUS.COMPLETED };
+    case 'cancelled':
+      return { status: { $in: [BOOKING_STATUS.CANCELLED, BOOKING_STATUS.DECLINED] } };
+    default:
+      return null;
+  }
+}
+
+function guestReservationCountFacet() {
+  const facet = { all: [{ $count: 'count' }] };
+  GUEST_RESERVATION_TABS.filter((tab) => tab !== 'all').forEach((tab) => {
+    facet[tab] = [{ $match: buildGuestReservationStatusFilter(tab) }, { $count: 'count' }];
+  });
+  return facet;
+}
+
+async function getBookingsForGuest(userId, { page = 1, limit = 10, tab = 'all' } = {}) {
+  const skip = (page - 1) * limit;
+  const normalizedTab = typeof tab === 'string' ? tab.trim().toLowerCase() : 'all';
+  if (!GUEST_RESERVATION_TABS.includes(normalizedTab)) {
+    throw new ApiError(
+      400,
+      `Invalid tab. Allowed values: ${GUEST_RESERVATION_TABS.join(', ')}.`
+    );
+  }
+
+  const guestId =
+    userId instanceof mongoose.Types.ObjectId
+      ? userId
+      : new mongoose.Types.ObjectId(String(userId));
+  const commonFilter = { bookedBy: guestId };
+  const filter = combineReservationFilters(
+    commonFilter,
+    buildGuestReservationStatusFilter(normalizedTab)
+  );
+
+  const [bookings, [countResult = {}]] = await Promise.all([
     Booking.find(filter)
       .populate('listing')
       .populate('host', 'email role agencyName city')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit),
-    Booking.countDocuments(filter),
+    Booking.aggregate([{ $match: commonFilter }, { $facet: guestReservationCountFacet() }]),
   ]);
 
   await paymentsService.reconcileProcessingBookings(bookings);
+
+  const count = (key) => {
+    const rows = countResult && countResult[key];
+    return rows && rows[0] ? rows[0].count : 0;
+  };
+  const counts = {
+    all: count('all'),
+    in_progress: count('in_progress'),
+    completed: count('completed'),
+    cancelled: count('cancelled'),
+  };
 
   const serializedBookings = bookings.map((booking) => booking.toJSON());
 
   return {
     bookings: await attachReviewDataToBookings(serializedBookings, userId),
-    pagination: buildPagination(total, page, limit),
+    pagination: buildPagination(counts[normalizedTab], page, limit),
+    filters: {
+      tab: normalizedTab,
+      counts,
+    },
   };
 }
 
@@ -1347,6 +1411,7 @@ module.exports = {
   RESERVATION_TABS,
   _private: {
     buildReservationStatusFilter,
+    buildGuestReservationStatusFilter,
     buildReservationDateFilter,
     readReservationCounts,
     startOfUtcWeek,

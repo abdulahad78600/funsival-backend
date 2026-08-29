@@ -8,6 +8,8 @@ const {
   updateUserProfileImage,
   listUsersForAdmin,
   getUserForAdmin,
+  updateUserForAdmin,
+  deleteUserForAdmin,
 } = require('./users.service');
 
 const savePreferencesHandler = asyncHandler(async (req, res) => {
@@ -85,6 +87,26 @@ const getAdminUserHandler = asyncHandler(async (req, res) => {
   });
 });
 
+const updateAdminUserHandler = asyncHandler(async (req, res) => {
+  const user = await updateUserForAdmin(req.params.userId, req.body, req.user.id);
+
+  res.status(200).json({
+    success: true,
+    message: 'User updated successfully.',
+    data: { user },
+  });
+});
+
+const deleteAdminUserHandler = asyncHandler(async (req, res) => {
+  const result = await deleteUserForAdmin(req.params.userId, req.user.id);
+
+  res.status(200).json({
+    success: true,
+    message: 'User deleted successfully.',
+    data: result,
+  });
+});
+
 module.exports = {
   savePreferencesHandler,
   updateProviderProfileHandler,
@@ -92,4 +114,6 @@ module.exports = {
   uploadProfilePictureHandler,
   listAdminUsersHandler,
   getAdminUserHandler,
+  updateAdminUserHandler,
+  deleteAdminUserHandler,
 };

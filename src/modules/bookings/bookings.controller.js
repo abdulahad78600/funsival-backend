@@ -3,6 +3,7 @@ const {
   validateBookingId,
   validateCreateBookingPayload,
   validateHostBookingsQuery,
+  validateGuestBookingsQuery,
 } = require('./bookings.validation');
 const {
   createBooking,
@@ -16,12 +17,6 @@ const {
   acceptBookingRequest,
   declineBookingRequest,
 } = require('./bookings.service');
-
-function parsePaginationQuery(query) {
-  const page = Math.max(1, parseInt(query.page, 10) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 10));
-  return { page, limit };
-}
 
 const createBookingHandler = asyncHandler(async (req, res) => {
   const payload = validateCreateBookingPayload(req.body);
@@ -46,8 +41,8 @@ const getBookingQuoteHandler = asyncHandler(async (req, res) => {
 });
 
 const getMyBookingsHandler = asyncHandler(async (req, res) => {
-  const pagination = parsePaginationQuery(req.query);
-  const result = await getBookingsForGuest(req.user.id, pagination);
+  const query = validateGuestBookingsQuery(req.query);
+  const result = await getBookingsForGuest(req.user.id, query);
 
   res.status(200).json({
     success: true,

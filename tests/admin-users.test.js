@@ -181,6 +181,136 @@ test('admin user detail adds booking breakdowns and reviews written', async () =
   }
 });
 
+test('admin user update applies profile + account fields and blocks self-demotion', async () => {
+  const user = fakeUser({ providerProfile: { firstName: 'Jane', lastName: 'Doe', location: {} } });
+  let saved = false;
+  user.save = async () => {
+    saved = true;
+  };
+
+  const originalFindById = User.findById;
+  const originalFindOne = User.findOne;
+  User.findById = () => {
+    const query = Promise.resolve(user);
+    query.select = async () => user;
+    return query;
+  };
+  User.findOne = () => ({ select: async () => null });
+  const originalReviewCount = Review.countDocuments;
+  Review.countDocuments = async () => 0;
+  const restoreStats = stubStats();
+
+  try {
+    const admin = new mongoose.Types.ObjectId();
+    const result = await usersService.updateUserForAdmin(
+      user._id.toString(),
+      { firstName: 'Janet', role: 'user', isEmailVerified: false, email: 'NEW@Example.com', city: 'Abu Dhabi' },
+      admin.toString()
+    );
+
+    assert.equal(saved, true);
+    assert.equal(user.providerProfile.firstName, 'Janet');
+    assert.equal(user.providerProfile.lastName, 'Doe');
+    assert.equal(user.role, 'user');
+    assert.equal(user.isEmailVerified, false);
+    assert.equal(user.email, 'new@example.com');
+    assert.equal(user.city, 'Abu Dhabi');
+    assert.equal(result.id, user._id.toString());
+
+    await assert.rejects(
+      () => usersService.updateUserForAdmin(user._id.toString(), { role: 'superuser' }, admin.toString()),
+      (error) => error.statusCode === 400 && /role must be one of/.test(error.details.role)
+    );
+    await assert.rejects(
+      () => usersService.updateUserForAdmin(user._id.toString(), {}, admin.toString()),
+      (error) => error.statusCode === 400 && /At least one field/.test(error.details.payload)
+    );
+    await assert.rejects(
+      () => usersService.updateUserForAdmin(user._id.toString(), { role: 'host' }, user._id.toString()),
+      /cannot change your own admin role/
+    );
+  } finally {
+    User.findById = originalFindById;
+    User.findOne = originalFindOne;
+    Review.countDocuments = originalReviewCount;
+    restoreStats();
+  }
+});
+
+test('admin user delete cascades listings and refuses self-delete or users with active bookings', async () => {
+  const user = fakeUser();
+  const listingId = new mongoose.Types.ObjectId();
+  const Wishlist = require('../src/models/wishlist.model');
+  const ListingView = require('../src/models/listing-view.model');
+
+  const originals = {
+    findById: User.findById,
+    deleteOne: User.deleteOne,
+    bookingCount: Booking.countDocuments,
+    listingFind: Listing.find,
+    listingDelete: Listing.deleteMany,
+    draftDelete: DraftListing.deleteMany,
+    wishlistDelete: Wishlist.deleteMany,
+    viewDelete: ListingView.deleteMany,
+  };
+
+  let activeBookings = 2;
+  let userDeleted = false;
+  const deleteFilters = {};
+  User.findById = () => ({ select: async () => user });
+  User.deleteOne = async () => {
+    userDeleted = true;
+    return { deletedCount: 1 };
+  };
+  Booking.countDocuments = async () => activeBookings;
+  Listing.find = () => ({ select: async () => [{ _id: listingId, photos: [] }] });
+  Listing.deleteMany = async (filter) => {
+    deleteFilters.listing = filter;
+    return { deletedCount: 1 };
+  };
+  DraftListing.deleteMany = async () => ({ deletedCount: 2 });
+  Wishlist.deleteMany = async (filter) => {
+    deleteFilters.wishlist = filter;
+    return { deletedCount: 3 };
+  };
+  ListingView.deleteMany = async (filter) => {
+    deleteFilters.view = filter;
+    return { deletedCount: 4 };
+  };
+
+  try {
+    const admin = new mongoose.Types.ObjectId().toString();
+
+    await assert.rejects(
+      () => usersService.deleteUserForAdmin(user._id.toString(), user._id.toString()),
+      /cannot delete your own account/
+    );
+    await assert.rejects(
+      () => usersService.deleteUserForAdmin(user._id.toString(), admin),
+      /2 active booking/
+    );
+    assert.equal(userDeleted, false);
+
+    activeBookings = 0;
+    const result = await usersService.deleteUserForAdmin(user._id.toString(), admin);
+
+    assert.equal(userDeleted, true);
+    assert.deepEqual(result.deleted, { listings: 1, draftListings: 2, wishlists: 3 });
+    assert.deepEqual(deleteFilters.listing, { _id: { $in: [listingId] } });
+    assert.equal(String(deleteFilters.wishlist.$or[0].user), user._id.toString());
+    assert.equal(String(deleteFilters.view.$or[0].host), user._id.toString());
+  } finally {
+    User.findById = originals.findById;
+    User.deleteOne = originals.deleteOne;
+    Booking.countDocuments = originals.bookingCount;
+    Listing.find = originals.listingFind;
+    Listing.deleteMany = originals.listingDelete;
+    DraftListing.deleteMany = originals.draftDelete;
+    Wishlist.deleteMany = originals.wishlistDelete;
+    ListingView.deleteMany = originals.viewDelete;
+  }
+});
+
 test('admin user detail rejects malformed IDs and returns 404 for unknown users', async () => {
   await assert.rejects(() => usersService.getUserForAdmin('nope'), /Invalid user ID/);
 

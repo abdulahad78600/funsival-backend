@@ -25,6 +25,20 @@ function normalizeStringArray(value, fieldName, normalizeItem = normalizeString)
   return normalizedValues;
 }
 
+function normalizeOptionalStringArray(value, fieldName, normalizeItem = normalizeString) {
+  if (value === undefined || value === null) {
+    return [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new ApiError(400, 'Validation failed.', {
+      [fieldName]: `${fieldName} must be an array.`,
+    });
+  }
+
+  return value.map((item) => normalizeItem(item)).filter(Boolean);
+}
+
 function validateTime(value, fieldName) {
   if (!/^\d{2}:\d{2}$/.test(value)) {
     throw new ApiError(400, 'Validation failed.', {
@@ -254,7 +268,7 @@ function validateListingPayload(payload = {}) {
       instructorName,
       cancellationPolicy,
       whatsIncluded: normalizeStringArray(serviceDetails.whatsIncluded, 'whatsIncluded'),
-      requirements: normalizeStringArray(serviceDetails.requirements, 'requirements'),
+      requirements: normalizeOptionalStringArray(serviceDetails.requirements, 'requirements'),
     },
     placeLocation: {
       addressLine1,

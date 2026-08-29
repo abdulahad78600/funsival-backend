@@ -7,9 +7,13 @@ const { BOOKING_STATUS } = require('../../constants/booking');
 const User = require('../../models/user.model');
 const ApiError = require('../../utils/api-error');
 const { USER_ROLES, AVAILABLE_ROLES } = require('../../constants/roles');
+const Wishlist = require('../../models/wishlist.model');
+const ListingView = require('../../models/listing-view.model');
+const { cleanupUnusedListingPhotos } = require('../listings/listings.service');
 const {
   validateProviderProfilePayload,
   validateUserProfilePayload,
+  validateAdminUserUpdatePayload,
 } = require('./users.validation');
 
 async function saveUserPreferences(userId, preferences) {
@@ -462,6 +466,155 @@ async function getUserForAdmin(userId) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Admin: edit + delete a user
+// ---------------------------------------------------------------------------
+
+const ACTIVE_BOOKING_STATUSES = [
+  BOOKING_STATUS.PENDING,
+  BOOKING_STATUS.AWAITING_HOST_APPROVAL,
+  BOOKING_STATUS.CONFIRMED,
+];
+
+function mergeProfile(user, validatedPayload) {
+  const profile = {
+    firstName: user.providerProfile?.firstName || '',
+    lastName: user.providerProfile?.lastName || '',
+    phoneNumber: user.providerProfile?.phoneNumber || '',
+    dateOfBirth: user.providerProfile?.dateOfBirth,
+    bio: user.providerProfile?.bio || '',
+    profileImage: user.providerProfile?.profileImage || '',
+    businessName: user.providerProfile?.businessName || user.agencyName || '',
+    businessType: user.providerProfile?.businessType || '',
+    location: {
+      addressLine1: user.providerProfile?.location?.addressLine1 || '',
+      addressLine2: user.providerProfile?.location?.addressLine2 || '',
+      city: user.providerProfile?.location?.city || user.city || '',
+      state: user.providerProfile?.location?.state || '',
+      postalCode: user.providerProfile?.location?.postalCode || '',
+      country: user.providerProfile?.location?.country || '',
+    },
+  };
+
+  const direct = ['firstName', 'lastName', 'phoneNumber', 'dateOfBirth', 'bio', 'profileImage', 'businessName', 'businessType'];
+  direct.forEach((key) => {
+    if (validatedPayload[key] !== undefined) profile[key] = validatedPayload[key];
+  });
+  const location = ['addressLine1', 'addressLine2', 'city', 'state', 'postalCode', 'country'];
+  location.forEach((key) => {
+    if (validatedPayload[key] !== undefined) profile.location[key] = validatedPayload[key];
+  });
+
+  return profile;
+}
+
+async function updateUserForAdmin(userId, payload, actingAdminId) {
+  const objectId = toObjectId(userId, 'user ID');
+  const validatedPayload = validateAdminUserUpdatePayload(payload);
+
+  const user = await User.findById(objectId);
+  if (!user) {
+    throw new ApiError(404, 'User not found.');
+  }
+
+  const isSelf = String(user._id) === String(actingAdminId);
+  if (
+    isSelf &&
+    validatedPayload.role !== undefined &&
+    validatedPayload.role !== USER_ROLES.ADMIN
+  ) {
+    throw new ApiError(400, 'You cannot change your own admin role.');
+  }
+
+  if (validatedPayload.email && validatedPayload.email !== user.email) {
+    const existingUser = await User.findOne({
+      email: validatedPayload.email,
+      _id: { $ne: user._id },
+    }).select('_id');
+
+    if (existingUser) {
+      throw new ApiError(409, 'An account with this email already exists.');
+    }
+
+    user.email = validatedPayload.email;
+  }
+
+  const profile = mergeProfile(user, validatedPayload);
+
+  if (validatedPayload.agencyName !== undefined) {
+    user.agencyName = validatedPayload.agencyName;
+  } else if (profile.businessName) {
+    user.agencyName = profile.businessName;
+  }
+  if (profile.location.city) {
+    user.city = profile.location.city;
+  }
+  if (validatedPayload.role !== undefined) user.role = validatedPayload.role;
+  if (validatedPayload.isEmailVerified !== undefined) {
+    user.isEmailVerified = validatedPayload.isEmailVerified;
+  }
+  if (validatedPayload.twoFactorEnabled !== undefined) {
+    user.twoFactorEnabled = validatedPayload.twoFactorEnabled;
+  }
+
+  user.providerProfile = profile;
+  await user.save();
+
+  return getUserForAdmin(objectId);
+}
+
+async function deleteUserForAdmin(userId, actingAdminId) {
+  const objectId = toObjectId(userId, 'user ID');
+
+  if (String(objectId) === String(actingAdminId)) {
+    throw new ApiError(400, 'You cannot delete your own account.');
+  }
+
+  const user = await User.findById(objectId).select('_id role');
+  if (!user) {
+    throw new ApiError(404, 'User not found.');
+  }
+
+  const activeBookings = await Booking.countDocuments({
+    status: { $in: ACTIVE_BOOKING_STATUSES },
+    $or: [{ bookedBy: objectId }, { host: objectId }],
+  });
+  if (activeBookings > 0) {
+    throw new ApiError(
+      409,
+      `This user has ${activeBookings} active booking(s). Resolve them before deleting the account.`
+    );
+  }
+
+  const listings = await Listing.find({ createdBy: objectId }).select('_id photos');
+  const listingIds = listings.map((listing) => listing._id);
+
+  const [listingResult, draftResult, wishlistResult] = await Promise.all([
+    Listing.deleteMany({ _id: { $in: listingIds } }),
+    DraftListing.deleteMany({ createdBy: objectId }),
+    Wishlist.deleteMany({
+      $or: [{ user: objectId }, { listing: { $in: listingIds } }],
+    }),
+    ListingView.deleteMany({
+      $or: [{ host: objectId }, { listing: { $in: listingIds } }],
+    }),
+  ]);
+
+  await User.deleteOne({ _id: objectId });
+
+  // Best-effort: remove locally stored listing photos that nothing references anymore.
+  await Promise.all(listings.map((listing) => cleanupUnusedListingPhotos(listing.photos)));
+
+  return {
+    id: String(objectId),
+    deleted: {
+      listings: listingResult.deletedCount || 0,
+      draftListings: draftResult.deletedCount || 0,
+      wishlists: wishlistResult.deletedCount || 0,
+    },
+  };
+}
+
 module.exports = {
   saveUserPreferences,
   updateProviderProfile,
@@ -469,4 +622,6 @@ module.exports = {
   updateUserProfileImage,
   listUsersForAdmin,
   getUserForAdmin,
+  updateUserForAdmin,
+  deleteUserForAdmin,
 };

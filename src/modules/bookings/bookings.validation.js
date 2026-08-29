@@ -103,6 +103,31 @@ function validateHostBookingsQuery(query = {}) {
   };
 }
 
+// Guest "My Reservations" tabs: All / In progress / Completed / Cancelled
+const GUEST_RESERVATION_TABS = ['all', 'in_progress', 'completed', 'cancelled'];
+const GUEST_TAB_ALIASES = {
+  'in-progress': 'in_progress',
+  inprogress: 'in_progress',
+  'in progress': 'in_progress',
+  active: 'in_progress',
+};
+
+function validateGuestBookingsQuery(query = {}) {
+  const page = Math.max(1, parseInt(query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(query.limit, 10) || 10));
+
+  const rawTab = normalizeString(query.tab).toLowerCase() || 'all';
+  const tab = GUEST_TAB_ALIASES[rawTab] || rawTab;
+  if (!GUEST_RESERVATION_TABS.includes(tab)) {
+    throw new ApiError(
+      400,
+      `Invalid tab. Allowed values: ${GUEST_RESERVATION_TABS.join(', ')}.`
+    );
+  }
+
+  return { page, limit, tab };
+}
+
 const AVAILABLE_PRICING_MODES = ['hourly', 'daily'];
 
 const MAX_SLOTS_PER_BOOKING = 48;
@@ -271,4 +296,6 @@ module.exports = {
   validateBookingId,
   validateCreateBookingPayload,
   validateHostBookingsQuery,
+  validateGuestBookingsQuery,
+  GUEST_RESERVATION_TABS,
 };

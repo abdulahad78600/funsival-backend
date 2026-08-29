@@ -9,11 +9,13 @@ const Booking = require('../../models/booking.model');
 const Wishlist = require('../../models/wishlist.model');
 const ApiError = require('../../utils/api-error');
 const { BOOKING_STATUS, BOOKING_TYPES } = require('../../constants/booking');
+const { normalizeCategory } = require('../../constants/listing');
 const { validateListingPayload } = require('./listings.validation');
 const {
   deleteLocalListingPhotos,
   findUnusedLocalListingPhotos,
   serializeListingRecord,
+  buildListingImagePublicUrl,
 } = require('./listing-images');
 const {
   buildEmptyReviewSummary,
@@ -437,6 +439,19 @@ async function getListingForUser(listingId, userId) {
   return serializedListing;
 }
 
+function parseDateOnly(value, fieldName) {
+  if (value === undefined || value === null || value === '') return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new ApiError(400, `\`${fieldName}\` must be a valid date (YYYY-MM-DD).`);
+  }
+  return parsed;
+}
+
+function escapeRegex(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 async function browseListings({
   page = 1,
   limit = 10,
@@ -444,6 +459,9 @@ async function browseListings({
   category,
   type,
   city,
+  location,
+  from,
+  until,
   search,
   minPrice,
   maxPrice,
@@ -451,9 +469,45 @@ async function browseListings({
   viewerId = null,
 } = {}) {
   const skip = (page - 1) * limit;
-  const filter = {};
+  // Public browse only ever shows listings the host has left active.
+  const filter = { isActive: true };
+  const andClauses = [];
 
   if (hostId) filter.createdBy = hostId;
+
+  // Landing "Where?" box: free text across city / state / country / address.
+  const locationTerm = typeof location === 'string' ? location.trim() : '';
+  if (locationTerm) {
+    const regex = new RegExp(escapeRegex(locationTerm), 'i');
+    andClauses.push({
+      $or: [
+        { 'placeLocation.city': regex },
+        { 'placeLocation.state': regex },
+        { 'placeLocation.country': regex },
+        { 'placeLocation.addressLine1': regex },
+        { 'basicInformation.location': regex },
+      ],
+    });
+  }
+
+  // Landing "From / Until" boxes: at least one open availability slot in range.
+  const fromDate = parseDateOnly(from, 'from');
+  const untilDate = parseDateOnly(until, 'until');
+  if (fromDate && untilDate && untilDate < fromDate) {
+    throw new ApiError(400, '`until` must be on or after `from`.');
+  }
+  if (fromDate || untilDate) {
+    const dateRange = {};
+    if (fromDate) dateRange.$gte = startOfUtcDay(fromDate);
+    if (untilDate) {
+      const end = startOfUtcDay(untilDate);
+      end.setUTCDate(end.getUTCDate() + 1);
+      dateRange.$lt = end;
+    }
+    filter.availability = {
+      $elemMatch: { date: dateRange, isAvailable: { $ne: false } },
+    };
+  }
 
   if (category) {
     const categories = String(category)
@@ -473,15 +527,21 @@ async function browseListings({
   if (search) {
     const term = String(search).trim();
     if (term) {
-      const regex = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-      filter.$or = [
-        { 'basicInformation.activityTitle': regex },
-        { 'basicInformation.description': regex },
-        { 'basicInformation.location': regex },
-        { category: regex },
-        { type: regex },
-      ];
+      const regex = new RegExp(escapeRegex(term), 'i');
+      andClauses.push({
+        $or: [
+          { 'basicInformation.activityTitle': regex },
+          { 'basicInformation.description': regex },
+          { 'basicInformation.location': regex },
+          { category: regex },
+          { type: regex },
+        ],
+      });
     }
+  }
+
+  if (andClauses.length > 0) {
+    filter.$and = [...(filter.$and || []), ...andClauses];
   }
 
   const min = minPrice !== undefined && minPrice !== '' ? Number(minPrice) : null;
@@ -537,6 +597,73 @@ async function browseListings({
   };
 }
 
+// ---------------------------------------------------------------------------
+// Landing page: "Browse by adventure" (types) and "Browse by destination" (cities)
+// ---------------------------------------------------------------------------
+
+function toCoverImage(photos) {
+  const first = Array.isArray(photos) ? photos.find(Boolean) : null;
+  return first ? buildListingImagePublicUrl(first) : null;
+}
+
+async function getBrowseTypes({ category, limit = 20 } = {}) {
+  const match = { isActive: true };
+  const normalizedCategory = category ? normalizeCategory(category) : '';
+  if (normalizedCategory) match.category = normalizedCategory;
+
+  const rows = await Listing.aggregate([
+    { $match: match },
+    {
+      $group: {
+        _id: { category: '$category', type: '$type' },
+        count: { $sum: 1 },
+        coverPhotos: { $first: '$photos' },
+      },
+    },
+    { $sort: { count: -1, '_id.type': 1 } },
+    { $limit: limit },
+  ]);
+
+  return rows.map((row) => ({
+    category: row._id.category,
+    type: row._id.type,
+    label: String(row._id.type || '')
+      .replace(/[_-]+/g, ' ')
+      .replace(/\b\w/g, (char) => char.toUpperCase()),
+    count: row.count,
+    coverImage: toCoverImage(row.coverPhotos),
+  }));
+}
+
+async function getBrowseDestinations({ limit = 12 } = {}) {
+  const rows = await Listing.aggregate([
+    { $match: { isActive: true, 'placeLocation.city': { $nin: [null, ''] } } },
+    {
+      $group: {
+        _id: {
+          city: { $toLower: { $trim: { input: '$placeLocation.city' } } },
+          country: { $toLower: { $trim: { input: '$placeLocation.country' } } },
+        },
+        city: { $first: '$placeLocation.city' },
+        state: { $first: '$placeLocation.state' },
+        country: { $first: '$placeLocation.country' },
+        count: { $sum: 1 },
+        coverPhotos: { $first: '$photos' },
+      },
+    },
+    { $sort: { count: -1, city: 1 } },
+    { $limit: limit },
+  ]);
+
+  return rows.map((row) => ({
+    city: row.city,
+    state: row.state || '',
+    country: row.country || '',
+    count: row.count,
+    coverImage: toCoverImage(row.coverPhotos),
+  }));
+}
+
 function recordListingView(listing) {
   const hostId =
     listing.createdBy && listing.createdBy._id
@@ -550,7 +677,8 @@ function recordListingView(listing) {
 }
 
 async function getListingById(listingId, { viewerId = null } = {}) {
-  const listing = await Listing.findById(listingId).populate(
+  // Public detail: an inactive listing is treated as if it doesn't exist.
+  const listing = await Listing.findOne({ _id: listingId, isActive: true }).populate(
     'createdBy',
     'email role agencyName city'
   );
@@ -643,7 +771,7 @@ async function getAvailableSlotsForListing(listingId, dateInput) {
     throw new ApiError(400, 'A valid `date` query parameter is required (YYYY-MM-DD).');
   }
 
-  const listing = await Listing.findById(listingId);
+  const listing = await Listing.findOne({ _id: listingId, isActive: true });
   if (!listing) {
     throw new ApiError(404, 'Listing not found.');
   }
@@ -1028,5 +1156,8 @@ module.exports = {
   getAdminListingStats,
   attachReviewSummariesToListings,
   attachWishlistFlags,
+  cleanupUnusedListingPhotos,
+  getBrowseTypes,
+  getBrowseDestinations,
   LISTING_STATUS_FILTERS,
 };

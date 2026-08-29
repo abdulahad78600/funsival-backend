@@ -13,6 +13,8 @@ const {
   updateListingForUser,
   deleteListingForUser,
   setListingActiveStatus,
+  getBrowseTypes,
+  getBrowseDestinations,
   getListingsForAdmin,
   getListingForAdmin,
   getAdminListingStats,
@@ -112,7 +114,8 @@ const getListingByIdHandler = asyncHandler(async (req, res) => {
 const browseListingsHandler = asyncHandler(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
-  const { hostId, category, type, city, search, minPrice, maxPrice, sort } = req.query;
+  const { hostId, category, type, city, location, from, until, search, minPrice, maxPrice, sort } =
+    req.query;
 
   const result = await browseListings({
     page,
@@ -121,6 +124,9 @@ const browseListingsHandler = asyncHandler(async (req, res) => {
     category,
     type,
     city,
+    location,
+    from,
+    until,
     search,
     minPrice,
     maxPrice,
@@ -132,6 +138,28 @@ const browseListingsHandler = asyncHandler(async (req, res) => {
     success: true,
     message: 'Listings fetched successfully.',
     data: result,
+  });
+});
+
+const getBrowseTypesHandler = asyncHandler(async (req, res) => {
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+  const types = await getBrowseTypes({ category: req.query.category, limit });
+
+  res.status(200).json({
+    success: true,
+    message: 'Adventure types fetched successfully.',
+    data: { types },
+  });
+});
+
+const getBrowseDestinationsHandler = asyncHandler(async (req, res) => {
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 12));
+  const destinations = await getBrowseDestinations({ limit });
+
+  res.status(200).json({
+    success: true,
+    message: 'Destinations fetched successfully.',
+    data: { destinations },
   });
 });
 
@@ -240,6 +268,8 @@ module.exports = {
   updateListingHandler,
   deleteListingHandler,
   setListingStatusHandler,
+  getBrowseTypesHandler,
+  getBrowseDestinationsHandler,
   getAdminListingsHandler,
   getAdminListingStatsHandler,
   getAdminListingByIdHandler,
