@@ -153,7 +153,6 @@ const userSchema = new mongoose.Schema(
     agencyName: {
       type: String,
       trim: true,
-      // Agency name is now optional for all users
     },
     email: {
       type: String,
