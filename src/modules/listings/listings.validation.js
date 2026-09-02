@@ -194,22 +194,34 @@ function validateListingPayload(payload = {}) {
     errors.description = 'Description is required.';
   }
 
+  const isActivity = category === 'activity';
+  const isPlace = category === 'place';
+  const isEquipment = category === 'equipment';
+
   const difficultyLevel = normalizeString(serviceDetails.difficultyLevel).toLowerCase();
   const maxParticipants = Number(serviceDetails.maxParticipants);
   const instructorName = normalizeString(serviceDetails.instructorName);
   const cancellationPolicy = normalizeString(serviceDetails.cancellationPolicy);
+  const brand = normalizeString(serviceDetails.brand);
+  const model = normalizeString(serviceDetails.model);
+  const parkingSpace = normalizeString(serviceDetails.parkingSpace);
+  const minRentalTime = normalizeString(serviceDetails.minRentalTime);
+  const maxRentalTime = normalizeString(serviceDetails.maxRentalTime);
+  const amenities = normalizeOptionalStringArray(serviceDetails.amenities, 'amenities');
 
-  if (!['beginner', 'intermediate', 'advanced', 'all_levels'].includes(difficultyLevel)) {
-    errors.difficultyLevel =
-      'Difficulty level must be beginner, intermediate, advanced, or all_levels.';
-  }
+  if (isActivity) {
+    if (!['beginner', 'intermediate', 'advanced', 'all_levels'].includes(difficultyLevel)) {
+      errors.difficultyLevel =
+        'Difficulty level must be beginner, intermediate, advanced, or all_levels.';
+    }
 
-  if (!Number.isFinite(maxParticipants) || maxParticipants <= 0) {
-    errors.maxParticipants = 'Max participants must be a number greater than 0.';
-  }
+    if (!Number.isFinite(maxParticipants) || maxParticipants <= 0) {
+      errors.maxParticipants = 'Max participants must be a number greater than 0.';
+    }
 
-  if (!instructorName) {
-    errors.instructorName = 'Instructor name is required.';
+    if (!instructorName) {
+      errors.instructorName = 'Instructor name is required.';
+    }
   }
 
   if (!cancellationPolicy) {
@@ -262,13 +274,27 @@ function validateListingPayload(payload = {}) {
       description,
     },
     serviceDetails: {
-      difficultyLevel,
-      duration: validateDuration(serviceDetails.duration),
-      maxParticipants,
-      instructorName,
       cancellationPolicy,
-      whatsIncluded: normalizeStringArray(serviceDetails.whatsIncluded, 'whatsIncluded'),
+      whatsIncluded: normalizeOptionalStringArray(serviceDetails.whatsIncluded, 'whatsIncluded'),
       requirements: normalizeOptionalStringArray(serviceDetails.requirements, 'requirements'),
+      ...(isActivity
+        ? {
+            difficultyLevel,
+            duration: validateDuration(serviceDetails.duration),
+            maxParticipants,
+            instructorName,
+          }
+        : {}),
+      ...(isEquipment ? { brand, model } : {}),
+      ...(isPlace
+        ? {
+            parkingSpace,
+            amenities,
+            minRentalTime,
+            maxRentalTime,
+            ...(Number.isFinite(maxParticipants) && maxParticipants > 0 ? { maxParticipants } : {}),
+          }
+        : {}),
     },
     placeLocation: {
       addressLine1,

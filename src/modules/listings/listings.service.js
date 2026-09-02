@@ -10,6 +10,10 @@ const Wishlist = require('../../models/wishlist.model');
 const ApiError = require('../../utils/api-error');
 const { BOOKING_STATUS, BOOKING_TYPES } = require('../../constants/booking');
 const { normalizeCategory } = require('../../constants/listing');
+const {
+  cancelBookingsForDeletedListing,
+  IN_PROGRESS_STATUSES,
+} = require('../bookings/bookings.service');
 const { validateListingPayload } = require('./listings.validation');
 const {
   deleteLocalListingPhotos,
@@ -426,6 +430,32 @@ async function setListingActiveStatus(listingId, userId, isActive) {
   return serializedListing;
 }
 
+// Flips isActive to false for active listings with no remaining upcoming
+// availability. Called periodically by the listing-expiry job.
+async function deactivateExpiredListings({ limit = 200 } = {}) {
+  const expiredListings = await Listing.find({
+    isActive: true,
+    availability: {
+      $not: {
+        $elemMatch: { date: { $gte: startOfUtcDay(new Date()) }, isAvailable: { $ne: false } },
+      },
+    },
+  })
+    .select('_id')
+    .limit(limit);
+
+  if (expiredListings.length === 0) {
+    return { deactivatedCount: 0 };
+  }
+
+  const result = await Listing.updateMany(
+    { _id: { $in: expiredListings.map((listing) => listing._id) } },
+    { $set: { isActive: false } }
+  );
+
+  return { deactivatedCount: result.modifiedCount ?? 0 };
+}
+
 async function getListingForUser(listingId, userId) {
   const listing = await Listing.findOne({ _id: listingId, createdBy: userId });
 
@@ -452,6 +482,44 @@ function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Shared by browseListings/getBrowseTypes/getBrowseDestinations: free-text
+// location match across city/state/country/address.
+function buildLocationOrClause(location) {
+  const locationTerm = typeof location === 'string' ? location.trim() : '';
+  if (!locationTerm) return null;
+  const regex = new RegExp(escapeRegex(locationTerm), 'i');
+  return {
+    $or: [
+      { 'placeLocation.city': regex },
+      { 'placeLocation.state': regex },
+      { 'placeLocation.country': regex },
+      { 'placeLocation.addressLine1': regex },
+      { 'basicInformation.location': regex },
+    ],
+  };
+}
+
+// Shared by browseListings/getBrowseTypes/getBrowseDestinations: at least one
+// open availability slot in range, clamped to today-or-later, narrowed
+// further when an explicit from/until is supplied.
+function buildAvailabilityElemMatch(from, until) {
+  const fromDate = parseDateOnly(from, 'from');
+  const untilDate = parseDateOnly(until, 'until');
+  if (fromDate && untilDate && untilDate < fromDate) {
+    throw new ApiError(400, '`until` must be on or after `from`.');
+  }
+  const todayStart = startOfUtcDay(new Date());
+  const dateRange = {
+    $gte: fromDate && fromDate > todayStart ? startOfUtcDay(fromDate) : todayStart,
+  };
+  if (untilDate) {
+    const end = startOfUtcDay(untilDate);
+    end.setUTCDate(end.getUTCDate() + 1);
+    dateRange.$lt = end;
+  }
+  return { $elemMatch: { date: dateRange, isAvailable: { $ne: false } } };
+}
+
 async function browseListings({
   page = 1,
   limit = 10,
@@ -476,38 +544,14 @@ async function browseListings({
   if (hostId) filter.createdBy = hostId;
 
   // Landing "Where?" box: free text across city / state / country / address.
-  const locationTerm = typeof location === 'string' ? location.trim() : '';
-  if (locationTerm) {
-    const regex = new RegExp(escapeRegex(locationTerm), 'i');
-    andClauses.push({
-      $or: [
-        { 'placeLocation.city': regex },
-        { 'placeLocation.state': regex },
-        { 'placeLocation.country': regex },
-        { 'placeLocation.addressLine1': regex },
-        { 'basicInformation.location': regex },
-      ],
-    });
-  }
+  const locationOrClause = buildLocationOrClause(location);
+  if (locationOrClause) andClauses.push(locationOrClause);
 
   // Landing "From / Until" boxes: at least one open availability slot in range.
-  const fromDate = parseDateOnly(from, 'from');
-  const untilDate = parseDateOnly(until, 'until');
-  if (fromDate && untilDate && untilDate < fromDate) {
-    throw new ApiError(400, '`until` must be on or after `from`.');
-  }
-  if (fromDate || untilDate) {
-    const dateRange = {};
-    if (fromDate) dateRange.$gte = startOfUtcDay(fromDate);
-    if (untilDate) {
-      const end = startOfUtcDay(untilDate);
-      end.setUTCDate(end.getUTCDate() + 1);
-      dateRange.$lt = end;
-    }
-    filter.availability = {
-      $elemMatch: { date: dateRange, isAvailable: { $ne: false } },
-    };
-  }
+  // Always requires at least one upcoming (today or later) slot, narrowed
+  // further whenever the visitor supplies an explicit from/until — this is
+  // also what keeps listings with fully-expired availability out of browse.
+  filter.availability = buildAvailabilityElemMatch(from, until);
 
   if (category) {
     const categories = String(category)
@@ -606,10 +650,17 @@ function toCoverImage(photos) {
   return first ? buildListingImagePublicUrl(first) : null;
 }
 
-async function getBrowseTypes({ category, limit = 20 } = {}) {
+async function getBrowseTypes({ category, limit = 20, location, from, until } = {}) {
   const match = { isActive: true };
   const normalizedCategory = category ? normalizeCategory(category) : '';
   if (normalizedCategory) match.category = normalizedCategory;
+
+  const locationOrClause = buildLocationOrClause(location);
+  if (locationOrClause) match.$and = [locationOrClause];
+
+  if (from || until) {
+    match.availability = buildAvailabilityElemMatch(from, until);
+  }
 
   const rows = await Listing.aggregate([
     { $match: match },
@@ -635,9 +686,18 @@ async function getBrowseTypes({ category, limit = 20 } = {}) {
   }));
 }
 
-async function getBrowseDestinations({ limit = 12 } = {}) {
+async function getBrowseDestinations({ limit = 12, location, from, until } = {}) {
+  const match = { isActive: true, 'placeLocation.city': { $nin: [null, ''] } };
+
+  const locationOrClause = buildLocationOrClause(location);
+  if (locationOrClause) match.$and = [locationOrClause];
+
+  if (from || until) {
+    match.availability = buildAvailabilityElemMatch(from, until);
+  }
+
   const rows = await Listing.aggregate([
-    { $match: { isActive: true, 'placeLocation.city': { $nin: [null, ''] } } },
+    { $match: match },
     {
       $group: {
         _id: {
@@ -677,11 +737,15 @@ function recordListingView(listing) {
 }
 
 async function getListingById(listingId, { viewerId = null } = {}) {
-  // Public detail: an inactive listing is treated as if it doesn't exist.
-  const listing = await Listing.findOne({ _id: listingId, isActive: true }).populate(
-    'createdBy',
-    'email role agencyName city'
-  );
+  // Public detail: an inactive listing, or one with no upcoming availability,
+  // is treated as if it doesn't exist.
+  const listing = await Listing.findOne({
+    _id: listingId,
+    isActive: true,
+    availability: {
+      $elemMatch: { date: { $gte: startOfUtcDay(new Date()) }, isAvailable: { $ne: false } },
+    },
+  }).populate('createdBy', 'email role agencyName city');
 
   if (!listing) {
     throw new ApiError(404, 'Listing not found.');
@@ -1130,13 +1194,31 @@ async function updateListingForUser(listingId, payload, userId) {
   return serializedListing;
 }
 
-async function deleteListingForUser(listingId, userId) {
-  const listing = await Listing.findOneAndDelete({ _id: listingId, createdBy: userId });
+async function deleteListingForUser(listingId, userId, { confirmed = false } = {}) {
+  const listing = await Listing.findOne({ _id: listingId, createdBy: userId });
 
   if (!listing) {
     throw new ApiError(404, 'Listing not found.');
   }
 
+  const upcomingCount = await Booking.countDocuments({
+    listing: listingId,
+    status: { $in: IN_PROGRESS_STATUSES },
+  });
+
+  if (upcomingCount > 0 && !confirmed) {
+    throw new ApiError(
+      409,
+      `This listing has ${upcomingCount} upcoming reservation${upcomingCount === 1 ? '' : 's'}. Deleting it will cancel and refund ${upcomingCount === 1 ? 'it' : 'them'}.`,
+      { upcomingCount, requiresConfirmation: true }
+    );
+  }
+
+  if (upcomingCount > 0) {
+    await cancelBookingsForDeletedListing(listingId, userId);
+  }
+
+  await Listing.deleteOne({ _id: listingId });
   await cleanupUnusedListingPhotos(listing.photos);
 }
 
@@ -1151,6 +1233,7 @@ module.exports = {
   updateListingForUser,
   deleteListingForUser,
   setListingActiveStatus,
+  deactivateExpiredListings,
   getListingsForAdmin,
   getListingForAdmin,
   getAdminListingStats,

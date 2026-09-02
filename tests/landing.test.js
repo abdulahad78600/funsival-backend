@@ -30,11 +30,20 @@ test('landing search: location + date range map to placeLocation and availabilit
   };
   Listing.countDocuments = async () => 0;
 
+  const toDateOnly = (date) => date.toISOString().slice(0, 10);
+  const addDays = (days) => {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() + days);
+    return d;
+  };
+  const fromInput = toDateOnly(addDays(1));
+  const untilInput = toDateOnly(addDays(3));
+
   try {
     await listingsService.browseListings({
       location: 'Lahore',
-      from: '2026-09-01',
-      until: '2026-09-03',
+      from: fromInput,
+      until: untilInput,
       search: 'cave',
     });
 
@@ -50,16 +59,22 @@ test('landing search: location + date range map to placeLocation and availabilit
     assert.ok(searchClause, 'search clause still present alongside location');
 
     const slot = received.availability.$elemMatch;
-    assert.equal(slot.date.$gte.toISOString(), '2026-09-01T00:00:00.000Z');
-    assert.equal(slot.date.$lt.toISOString(), '2026-09-04T00:00:00.000Z');
+    assert.equal(slot.date.$gte.toISOString(), `${fromInput}T00:00:00.000Z`);
+    assert.equal(slot.date.$lt.toISOString(), `${toDateOnly(addDays(4))}T00:00:00.000Z`);
     assert.deepEqual(slot.isAvailable, { $ne: false });
+
+    // No explicit from/until still requires at least one upcoming slot, not any slot.
+    await listingsService.browseListings({});
+    const todayStr = toDateOnly(new Date());
+    assert.equal(received.availability.$elemMatch.date.$gte.toISOString(), `${todayStr}T00:00:00.000Z`);
+    assert.equal(received.availability.$elemMatch.date.$lt, undefined);
 
     await assert.rejects(
       () => listingsService.browseListings({ from: 'not-a-date' }),
       /`from` must be a valid date/
     );
     await assert.rejects(
-      () => listingsService.browseListings({ from: '2026-09-05', until: '2026-09-01' }),
+      () => listingsService.browseListings({ from: toDateOnly(addDays(5)), until: toDateOnly(addDays(1)) }),
       /`until` must be on or after `from`/
     );
   } finally {
@@ -102,6 +117,25 @@ test('landing: browse types and destinations aggregate active listings with cove
     assert.deepEqual(destinations, [
       { city: 'Lahore', state: 'Punjab', country: 'Pakistan', count: 6, coverImage: 'https://cdn/l.jpg' },
     ]);
+
+    // Landing search: location + date range narrow both aggregations the
+    // same way browseListings does.
+    const addDays = (days) => {
+      const d = new Date();
+      d.setUTCDate(d.getUTCDate() + days);
+      return d.toISOString().slice(0, 10);
+    };
+
+    await listingsService.getBrowseTypes({ location: 'Lahore', from: addDays(1), until: addDays(3) });
+    const typesMatch = pipelines[pipelines.length - 1][0].$match;
+    assert.ok(typesMatch.$and[0].$or.some((o) => o['placeLocation.city']));
+    assert.ok(typesMatch.availability.$elemMatch.date.$gte instanceof Date);
+    assert.ok(typesMatch.availability.$elemMatch.date.$lt instanceof Date);
+    assert.deepEqual(typesMatch.availability.$elemMatch.isAvailable, { $ne: false });
+
+    await listingsService.getBrowseDestinations({ location: 'Lahore' });
+    const destinationsMatch = pipelines[pipelines.length - 1][0].$match;
+    assert.ok(destinationsMatch.$and[0].$or.some((o) => o['placeLocation.city']));
   } finally {
     Listing.aggregate = originalAggregate;
   }

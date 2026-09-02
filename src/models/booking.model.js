@@ -24,6 +24,20 @@ const bookingSlotSchema = new mongoose.Schema(
   { _id: false }
 );
 
+// Captured once at booking time so the guest/host can still see what they
+// booked (title, location, photo) even after the listing is deleted — the
+// live Listing document is the source of truth while it exists; this is
+// only a fallback for display once it's gone.
+const listingSnapshotSchema = new mongoose.Schema(
+  {
+    title: { type: String, default: null },
+    location: { type: String, default: null },
+    category: { type: String, default: null },
+    photo: { type: String, default: null },
+  },
+  { _id: false }
+);
+
 const bookingSchema = new mongoose.Schema(
   {
     listing: {
@@ -31,6 +45,10 @@ const bookingSchema = new mongoose.Schema(
       ref: 'Listing',
       required: true,
       index: true,
+    },
+    listingSnapshot: {
+      type: listingSnapshotSchema,
+      default: null,
     },
     bookedBy: {
       type: mongoose.Schema.Types.ObjectId,

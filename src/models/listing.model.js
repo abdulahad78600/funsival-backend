@@ -16,26 +16,30 @@ const durationSchema = new mongoose.Schema(
   { _id: false }
 );
 
+function requiredForActivity() {
+  return this.parent().category === 'activity';
+}
+
 const serviceDetailsSchema = new mongoose.Schema(
   {
     difficultyLevel: {
       type: String,
       enum: ['beginner', 'intermediate', 'advanced', 'all_levels'],
-      required: true,
+      required: requiredForActivity,
     },
     duration: {
       type: durationSchema,
-      required: true,
+      required: requiredForActivity,
     },
     maxParticipants: {
       type: Number,
-      required: true,
       min: 1,
+      required: requiredForActivity,
     },
     instructorName: {
       type: String,
       trim: true,
-      required: true,
+      required: requiredForActivity,
     },
     cancellationPolicy: {
       type: String,
@@ -44,15 +48,42 @@ const serviceDetailsSchema = new mongoose.Schema(
     },
     whatsIncluded: {
       type: [String],
-      required: true,
-      validate: {
-        validator: (value) => Array.isArray(value) && value.length > 0,
-        message: 'At least one included item is required.',
-      },
+      default: [],
     },
     requirements: {
       type: [String],
       default: [],
+    },
+    // Equipment-only fields
+    brand: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    model: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    // Place-only fields
+    parkingSpace: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    amenities: {
+      type: [String],
+      default: [],
+    },
+    minRentalTime: {
+      type: String,
+      trim: true,
+      default: '',
+    },
+    maxRentalTime: {
+      type: String,
+      trim: true,
+      default: '',
     },
   },
   { _id: false }

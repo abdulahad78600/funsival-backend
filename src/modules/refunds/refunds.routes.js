@@ -9,19 +9,19 @@ const guestRouter = express.Router();
 guestRouter.post(
   '/:bookingId/refund-request',
   authenticate,
-  authorizeRoles(USER_ROLES.USER),
+  authorizeRoles(USER_ROLES.USER, USER_ROLES.HOST),
   refundsController.createRefundRequestHandler
 );
 guestRouter.get(
   '/:bookingId/refund-request',
   authenticate,
-  authorizeRoles(USER_ROLES.USER),
+  authorizeRoles(USER_ROLES.USER, USER_ROLES.HOST),
   refundsController.getMyRefundRequestHandler
 );
 guestRouter.delete(
   '/:bookingId/refund-request',
   authenticate,
-  authorizeRoles(USER_ROLES.USER),
+  authorizeRoles(USER_ROLES.USER, USER_ROLES.HOST),
   refundsController.withdrawRefundRequestHandler
 );
 

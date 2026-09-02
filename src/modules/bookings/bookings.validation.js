@@ -27,6 +27,12 @@ function isValidDate(value) {
   return !Number.isNaN(date.getTime());
 }
 
+function startOfUtcDay(date) {
+  const result = new Date(date);
+  result.setUTCHours(0, 0, 0, 0);
+  return result;
+}
+
 function isValidTime(value) {
   return typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value);
 }
@@ -221,6 +227,8 @@ function validateCreateBookingPayload(payload = {}) {
     errors.startDate = 'Start date is required.';
   } else if (!isValidDate(startDate)) {
     errors.startDate = 'Start date is invalid.';
+  } else if (startOfUtcDay(new Date(startDate)) < startOfUtcDay(new Date())) {
+    errors.startDate = 'Start date cannot be in the past.';
   }
 
   if (endDate && !isValidDate(endDate)) {

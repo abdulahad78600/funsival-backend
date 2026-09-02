@@ -59,7 +59,7 @@ test('reservation status tabs map to the expected booking states', () => {
     status: 'completed',
   });
   assert.deepEqual(buildReservationStatusFilter('cancelled', now), {
-    status: { $in: ['cancelled', 'declined'] },
+    status: { $in: ['cancelled', 'declined', 'listing_deleted'] },
   });
 });
 
@@ -85,7 +85,7 @@ test('guest reservation tabs map to booking states', () => {
   });
   assert.deepEqual(buildGuestReservationStatusFilter('completed'), { status: 'completed' });
   assert.deepEqual(buildGuestReservationStatusFilter('cancelled'), {
-    status: { $in: ['cancelled', 'declined'] },
+    status: { $in: ['cancelled', 'declined', 'listing_deleted'] },
   });
 });
 

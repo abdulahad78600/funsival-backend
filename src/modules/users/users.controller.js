@@ -4,6 +4,7 @@ const { uploadFileToSpaces } = require('../../services/do-spaces.upload');
 const {
   saveUserPreferences,
   updateProviderProfile,
+  becomeProvider,
   updateUserProfile,
   updateUserProfileImage,
   listUsersForAdmin,
@@ -31,6 +32,16 @@ const updateProviderProfileHandler = asyncHandler(async (req, res) => {
     success: true,
     message: 'Provider profile updated successfully.',
     data: { user },
+  });
+});
+
+const becomeProviderHandler = asyncHandler(async (req, res) => {
+  const result = await becomeProvider(req.user.id, req.body);
+
+  res.status(200).json({
+    success: true,
+    message: 'You are now a provider on Funsival.',
+    data: result,
   });
 });
 
@@ -110,6 +121,7 @@ const deleteAdminUserHandler = asyncHandler(async (req, res) => {
 module.exports = {
   savePreferencesHandler,
   updateProviderProfileHandler,
+  becomeProviderHandler,
   updateUserProfileHandler,
   uploadProfilePictureHandler,
   listAdminUsersHandler,

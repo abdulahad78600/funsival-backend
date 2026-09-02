@@ -12,6 +12,7 @@ const BOOKING_STATUS = {
   DECLINED: 'declined',
   CANCELLED: 'cancelled',
   COMPLETED: 'completed',
+  LISTING_DELETED: 'listing_deleted',
 };
 
 const PAYMENT_STATUS = {
