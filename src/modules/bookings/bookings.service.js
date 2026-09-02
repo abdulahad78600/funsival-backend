@@ -537,6 +537,12 @@ async function createBooking(payload, userId) {
 
   const booking = await Booking.create({
     listing: listing._id,
+    listingSnapshot: {
+      title: listing.basicInformation?.activityTitle || null,
+      location: listing.basicInformation?.location || null,
+      category: listing.category || null,
+      photo: Array.isArray(listing.photos) && listing.photos.length > 0 ? listing.photos[0] : null,
+    },
     bookedBy: userId,
     host: listing.createdBy,
     bookingType,
@@ -639,7 +645,7 @@ function buildGuestReservationStatusFilter(tab) {
     case 'completed':
       return { status: BOOKING_STATUS.COMPLETED };
     case 'cancelled':
-      return { status: { $in: [BOOKING_STATUS.CANCELLED, BOOKING_STATUS.DECLINED] } };
+      return { status: { $in: [BOOKING_STATUS.CANCELLED, BOOKING_STATUS.DECLINED, BOOKING_STATUS.LISTING_DELETED] } };
     default:
       return null;
   }
@@ -726,7 +732,7 @@ function buildReservationStatusFilter(tab, now) {
     case 'completed':
       return { status: BOOKING_STATUS.COMPLETED };
     case 'cancelled':
-      return { status: { $in: [BOOKING_STATUS.CANCELLED, BOOKING_STATUS.DECLINED] } };
+      return { status: { $in: [BOOKING_STATUS.CANCELLED, BOOKING_STATUS.DECLINED, BOOKING_STATUS.LISTING_DELETED] } };
     default:
       return null;
   }
@@ -885,6 +891,8 @@ async function getBookingsForHost(
         'bookedBy',
         'email role city providerProfile.firstName providerProfile.lastName'
       )
+      .populate('cancelledBy', 'email')
+      .populate('declinedBy', 'email')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit),
@@ -1264,7 +1272,9 @@ async function getBookingByIdForUser(bookingId, userId) {
   const booking = await Booking.findById(bookingId)
     .populate('listing')
     .populate('host', 'email role agencyName city')
-    .populate('bookedBy', 'email role city');
+    .populate('bookedBy', 'email role city')
+    .populate('cancelledBy', 'email')
+    .populate('declinedBy', 'email');
 
   if (!booking) {
     throw new ApiError(404, 'Booking not found.');
@@ -1384,6 +1394,90 @@ async function cancelBooking(bookingId, userId) {
   return booking.toJSON();
 }
 
+// Cancels + refunds every in-progress booking on a listing the host is
+// deleting, and notifies each affected guest. One booking's failure doesn't
+// abort the rest — each is handled independently and logged on error.
+async function cancelBookingsForDeletedListing(listingId, hostId) {
+  const bookings = await Booking.find({
+    listing: listingId,
+    status: { $in: IN_PROGRESS_STATUSES },
+  });
+
+  let processedCount = 0;
+
+  for (const booking of bookings) {
+    try {
+      let refunded = false;
+
+      if (booking.paymentStatus === PAYMENT_STATUS.AUTHORIZED) {
+        await paymentsService.cancelAuthorizationForBooking(
+          booking._id,
+          hostId,
+          'Listing deleted by provider.'
+        );
+        refunded = true;
+      } else if (booking.paymentStatus === PAYMENT_STATUS.HELD) {
+        await paymentsService.executeStripeRefund(booking, hostId, 'requested_by_customer');
+        refunded = true;
+      } else if (
+        booking.paymentStatus === PAYMENT_STATUS.RELEASED ||
+        booking.paymentStatus === PAYMENT_STATUS.RELEASING
+      ) {
+        // Funds have already moved to the host — this can't be auto-refunded
+        // via Stripe. Flag loudly for manual/admin follow-up rather than
+        // silently proceeding as if the guest was made whole.
+        console.error(
+          `Listing deletion cancelled booking ${booking._id} whose payment is already ` +
+            `${booking.paymentStatus} (funds released to host) — needs manual refund review.`
+        );
+      }
+
+      // cancelAuthorizationForBooking (called above when acting as the host)
+      // marks the booking DECLINED and sets declinedBy/declinedAt/declineReason.
+      // Clear those alongside the LISTING_DELETED overwrite so a booking never
+      // shows both "declined by" and "cancelled by" for the same event.
+      await Booking.updateOne(
+        { _id: booking._id },
+        {
+          $set: {
+            status: BOOKING_STATUS.LISTING_DELETED,
+            cancelledAt: new Date(),
+            cancelledBy: hostId,
+          },
+          $unset: {
+            declinedAt: '',
+            declinedBy: '',
+            declineReason: '',
+          },
+        }
+      );
+
+      sendNotification(booking.bookedBy, {
+        type: NOTIFICATION_TYPES.BOOKING_CANCELLED,
+        title: 'Listing removed',
+        body: refunded
+          ? 'The provider removed this listing. Your booking has been cancelled and any payment has been refunded.'
+          : 'The provider removed this listing. Your booking has been cancelled. Our team will follow up about your payment shortly.',
+        data: {
+          bookingId: booking._id.toString(),
+          listingId: booking.listing ? booking.listing.toString() : '',
+        },
+      }).catch((error) =>
+        console.error('Failed to notify guest of listing-deletion cancellation.', error)
+      );
+
+      processedCount += 1;
+    } catch (error) {
+      console.error(
+        `Failed to cancel booking ${booking._id} for deleted listing ${listingId}.`,
+        error
+      );
+    }
+  }
+
+  return { processedCount, totalCount: bookings.length };
+}
+
 function buildPagination(total, page, limit) {
   const totalPages = Math.ceil(total / limit);
   return {
@@ -1405,10 +1499,12 @@ module.exports = {
   getHostReservationStats,
   getBookingByIdForUser,
   cancelBooking,
+  cancelBookingsForDeletedListing,
   acceptBookingRequest,
   declineBookingRequest,
   notifyHostOfBookingRequest,
   RESERVATION_TABS,
+  IN_PROGRESS_STATUSES,
   _private: {
     buildReservationStatusFilter,
     buildGuestReservationStatusFilter,

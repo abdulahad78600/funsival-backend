@@ -223,8 +223,20 @@ function validateAdminUserUpdatePayload(payload = {}) {
   return validatedPayload;
 }
 
+function validateBecomeProviderPayload(payload = {}) {
+  const agencyName = validateOptionalString(payload.agencyName, 'agencyName', {
+    maxLength: 150,
+    allowEmpty: true,
+  });
+
+  return {
+    ...(agencyName ? { agencyName } : {}),
+  };
+}
+
 module.exports = {
   validateProviderProfilePayload,
   validateUserProfilePayload,
   validateAdminUserUpdatePayload,
+  validateBecomeProviderPayload,
 };

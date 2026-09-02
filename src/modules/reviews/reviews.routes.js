@@ -12,21 +12,21 @@ router.get('/hosts/:hostId', reviewsController.listHostReviewsHandler);
 router.get(
   '/bookings/:bookingId/me',
   authenticate,
-  authorizeRoles(USER_ROLES.USER),
+  authorizeRoles(USER_ROLES.USER, USER_ROLES.HOST),
   reviewsController.getMyBookingReviewHandler
 );
 
 router.post(
   '/bookings/:bookingId',
   authenticate,
-  authorizeRoles(USER_ROLES.USER),
+  authorizeRoles(USER_ROLES.USER, USER_ROLES.HOST),
   reviewsController.submitBookingReviewHandler
 );
 
 router.delete(
   '/bookings/:bookingId',
   authenticate,
-  authorizeRoles(USER_ROLES.USER),
+  authorizeRoles(USER_ROLES.USER, USER_ROLES.HOST),
   reviewsController.deleteBookingReviewHandler
 );
 

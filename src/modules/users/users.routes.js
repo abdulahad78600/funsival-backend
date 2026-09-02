@@ -6,6 +6,7 @@ const { upload } = require('../../services/do-spaces.upload');
 const {
   savePreferencesHandler,
   updateProviderProfileHandler,
+  becomeProviderHandler,
   updateUserProfileHandler,
   uploadProfilePictureHandler,
   listAdminUsersHandler,
@@ -20,13 +21,18 @@ router.post('/preferences', authenticate, savePreferencesHandler);
 router.patch(
   '/profile',
   authenticate,
-  authorizeRoles(USER_ROLES.USER),
+  authorizeRoles(USER_ROLES.USER, USER_ROLES.HOST),
   updateUserProfileHandler
 );
 router.patch(
   '/provider-profile',
   authenticate,
   updateProviderProfileHandler
+);
+router.post(
+  '/become-provider',
+  authenticate,
+  becomeProviderHandler
 );
 router.post(
   '/profile-picture',

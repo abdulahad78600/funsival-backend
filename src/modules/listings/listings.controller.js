@@ -143,7 +143,13 @@ const browseListingsHandler = asyncHandler(async (req, res) => {
 
 const getBrowseTypesHandler = asyncHandler(async (req, res) => {
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
-  const types = await getBrowseTypes({ category: req.query.category, limit });
+  const types = await getBrowseTypes({
+    category: req.query.category,
+    limit,
+    location: req.query.location,
+    from: req.query.from,
+    until: req.query.until,
+  });
 
   res.status(200).json({
     success: true,
@@ -154,7 +160,12 @@ const getBrowseTypesHandler = asyncHandler(async (req, res) => {
 
 const getBrowseDestinationsHandler = asyncHandler(async (req, res) => {
   const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 12));
-  const destinations = await getBrowseDestinations({ limit });
+  const destinations = await getBrowseDestinations({
+    limit,
+    location: req.query.location,
+    from: req.query.from,
+    until: req.query.until,
+  });
 
   res.status(200).json({
     success: true,
@@ -204,7 +215,9 @@ const updateListingHandler = asyncHandler(async (req, res) => {
 
 const deleteListingHandler = asyncHandler(async (req, res) => {
   const listingId = validateListingId(req.params.listingId);
-  await deleteListingForUser(listingId, req.user.id);
+  await deleteListingForUser(listingId, req.user.id, {
+    confirmed: req.query.confirm === 'true',
+  });
 
   res.status(200).json({
     success: true,

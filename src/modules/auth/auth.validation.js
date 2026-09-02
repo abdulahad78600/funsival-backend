@@ -254,6 +254,7 @@ function validateGoogleAuthPayload(payload = {}) {
   const role = normalizeString(payload.role).toLowerCase();
   const city = normalizeString(payload.city);
   const agencyName = normalizeString(payload.agencyName);
+  const mode = normalizeString(payload.mode).toLowerCase() || 'signup';
   const errors = {};
 
   if (!idToken) {
@@ -264,12 +265,17 @@ function validateGoogleAuthPayload(payload = {}) {
     errors.role = `Role must be one of: ${AVAILABLE_ROLES.join(', ')}.`;
   }
 
+  if (!['login', 'signup'].includes(mode)) {
+    errors.mode = 'Mode must be login or signup.';
+  }
+
   if (Object.keys(errors).length > 0) {
     throw new ApiError(400, 'Validation failed.', errors);
   }
 
   return {
     idToken,
+    mode,
     ...(role ? { role } : {}),
     ...(city ? { city } : {}),
     ...(agencyName ? { agencyName } : {}),

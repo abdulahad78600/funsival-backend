@@ -10,10 +10,12 @@ const { USER_ROLES, AVAILABLE_ROLES } = require('../../constants/roles');
 const Wishlist = require('../../models/wishlist.model');
 const ListingView = require('../../models/listing-view.model');
 const { cleanupUnusedListingPhotos } = require('../listings/listings.service');
+const { generateAuthToken } = require('../../utils/token');
 const {
   validateProviderProfilePayload,
   validateUserProfilePayload,
   validateAdminUserUpdatePayload,
+  validateBecomeProviderPayload,
 } = require('./users.validation');
 
 async function saveUserPreferences(userId, preferences) {
@@ -104,19 +106,37 @@ async function updateProviderProfile(userId, payload) {
   return user.toJSON();
 }
 
-async function updateUserProfile(userId, payload) {
-  const validatedPayload = validateUserProfilePayload(payload);
+async function becomeProvider(userId, payload) {
+  const validatedPayload = validateBecomeProviderPayload(payload);
   const user = await User.findById(userId);
 
   if (!user) {
     throw new ApiError(404, 'User not found.');
   }
 
-  if (user.role !== USER_ROLES.USER) {
-    throw new ApiError(
-      403,
-      'This endpoint is for user accounts. Hosts must use /users/provider-profile.'
-    );
+  if (user.role === USER_ROLES.HOST || user.role === USER_ROLES.ADMIN) {
+    throw new ApiError(400, 'You are already a provider.');
+  }
+
+  user.role = USER_ROLES.HOST;
+  if (validatedPayload.agencyName) {
+    user.agencyName = validatedPayload.agencyName;
+  }
+
+  await user.save();
+
+  return {
+    token: generateAuthToken(user),
+    user: user.toJSON(),
+  };
+}
+
+async function updateUserProfile(userId, payload) {
+  const validatedPayload = validateUserProfilePayload(payload);
+  const user = await User.findById(userId);
+
+  if (!user) {
+    throw new ApiError(404, 'User not found.');
   }
 
   if (validatedPayload.email && validatedPayload.email !== user.email) {
@@ -618,6 +638,7 @@ async function deleteUserForAdmin(userId, actingAdminId) {
 module.exports = {
   saveUserPreferences,
   updateProviderProfile,
+  becomeProvider,
   updateUserProfile,
   updateUserProfileImage,
   listUsersForAdmin,

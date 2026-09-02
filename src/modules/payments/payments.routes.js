@@ -72,7 +72,7 @@ router.post(
 router.post(
   '/bookings/:bookingId/pay',
   authenticate,
-  authorizeRoles(USER_ROLES.USER),
+  authorizeRoles(USER_ROLES.USER, USER_ROLES.HOST),
   paymentsController.authorizeBookingPaymentHandler
 );
 

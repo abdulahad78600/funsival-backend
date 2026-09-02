@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 const mongoose = require('mongoose');
 
 const listingsService = require('../src/modules/listings/listings.service');
+const bookingsService = require('../src/modules/bookings/bookings.service');
+const paymentsService = require('../src/modules/payments/payments.service');
 const Listing = require('../src/models/listing.model');
 const DraftListing = require('../src/models/draft-listing.model');
 const ListingView = require('../src/models/listing-view.model');
@@ -44,7 +46,10 @@ test('public browse, detail, and slots only expose active listings', async () =>
 
     const id = new mongoose.Types.ObjectId().toString();
     await assert.rejects(() => listingsService.getListingById(id), /Listing not found/);
-    assert.deepEqual(filters.findOne, { _id: id, isActive: true });
+    assert.equal(filters.findOne._id, id);
+    assert.equal(filters.findOne.isActive, true);
+    assert.ok(filters.findOne.availability.$elemMatch.date.$gte instanceof Date);
+    assert.deepEqual(filters.findOne.availability.$elemMatch.isAvailable, { $ne: false });
 
     filters.findOne = undefined;
     await assert.rejects(
@@ -606,5 +611,153 @@ test('listing rows expose the next upcoming availability slot', async () => {
     DraftListing.countDocuments = originalDraftCount;
     Booking.aggregate = originalBookingAggregate;
     Review.aggregate = originalReviewAggregate;
+  }
+});
+
+test('deleting a listing with upcoming bookings requires confirmation, naming the count', async () => {
+  const hostId = new mongoose.Types.ObjectId().toString();
+  const listingId = new mongoose.Types.ObjectId().toString();
+
+  const originalFindOne = Listing.findOne;
+  const originalBookingCount = Booking.countDocuments;
+
+  Listing.findOne = async () => ({ _id: listingId, createdBy: hostId, photos: [] });
+  Booking.countDocuments = async () => 2;
+
+  try {
+    await assert.rejects(
+      () => listingsService.deleteListingForUser(listingId, hostId),
+      (err) => {
+        assert.equal(err.statusCode, 409);
+        assert.match(err.message, /2 upcoming reservations/);
+        assert.deepEqual(err.details, { upcomingCount: 2, requiresConfirmation: true });
+        return true;
+      }
+    );
+  } finally {
+    Listing.findOne = originalFindOne;
+    Booking.countDocuments = originalBookingCount;
+  }
+});
+
+test('deleting a listing with zero upcoming bookings proceeds without confirmation', async () => {
+  const hostId = new mongoose.Types.ObjectId().toString();
+  const listingId = new mongoose.Types.ObjectId().toString();
+
+  const originalFindOne = Listing.findOne;
+  const originalBookingCount = Booking.countDocuments;
+  const originalDeleteOne = Listing.deleteOne;
+  let deletedFilter = null;
+
+  Listing.findOne = async () => ({ _id: listingId, createdBy: hostId, photos: [] });
+  Booking.countDocuments = async () => 0;
+  Listing.deleteOne = async (filter) => { deletedFilter = filter; return { deletedCount: 1 }; };
+
+  try {
+    await listingsService.deleteListingForUser(listingId, hostId);
+    assert.deepEqual(deletedFilter, { _id: listingId });
+  } finally {
+    Listing.findOne = originalFindOne;
+    Booking.countDocuments = originalBookingCount;
+    Listing.deleteOne = originalDeleteOne;
+  }
+});
+
+test('confirmed deletion cancels + refunds every in-progress booking and deletes the listing', async () => {
+  const hostId = new mongoose.Types.ObjectId().toString();
+  const listingId = new mongoose.Types.ObjectId().toString();
+  const guestId1 = new mongoose.Types.ObjectId().toString();
+  const guestId2 = new mongoose.Types.ObjectId().toString();
+  const guestId3 = new mongoose.Types.ObjectId().toString();
+
+  const authorizedBooking = { _id: new mongoose.Types.ObjectId(), paymentStatus: 'authorized', bookedBy: guestId1, listing: listingId };
+  const heldBooking = { _id: new mongoose.Types.ObjectId(), paymentStatus: 'held', bookedBy: guestId2, listing: listingId };
+  const unpaidBooking = { _id: new mongoose.Types.ObjectId(), paymentStatus: 'requires_payment', bookedBy: guestId3, listing: listingId };
+
+  const originalFindOne = Listing.findOne;
+  const originalBookingCount = Booking.countDocuments;
+  const originalBookingFind = Booking.find;
+  const originalBookingUpdateOne = Booking.updateOne;
+  const originalDeleteOne = Listing.deleteOne;
+  const originalCancelAuth = paymentsService.cancelAuthorizationForBooking;
+  const originalExecuteRefund = paymentsService.executeStripeRefund;
+
+  const cancelAuthCalls = [];
+  const refundCalls = [];
+  const statusUpdates = [];
+
+  Listing.findOne = async () => ({ _id: listingId, createdBy: hostId, photos: [] });
+  Booking.countDocuments = async () => 3;
+  Booking.find = async () => [authorizedBooking, heldBooking, unpaidBooking];
+  Booking.updateOne = async (filter, update) => {
+    statusUpdates.push({ id: filter._id.toString(), status: update.$set.status });
+    return { modifiedCount: 1 };
+  };
+  Listing.deleteOne = async () => ({ deletedCount: 1 });
+  paymentsService.cancelAuthorizationForBooking = async (bookingId, actorId, reason) => {
+    cancelAuthCalls.push({ bookingId, actorId, reason });
+    return { booking: authorizedBooking, isHost: true };
+  };
+  paymentsService.executeStripeRefund = async (booking, actorId, reason) => {
+    refundCalls.push({ bookingId: booking._id, actorId, reason });
+    return { booking: heldBooking, refund: { id: 're_test' } };
+  };
+
+  try {
+    await listingsService.deleteListingForUser(listingId, hostId, { confirmed: true });
+
+    assert.equal(cancelAuthCalls.length, 1);
+    assert.equal(cancelAuthCalls[0].bookingId, authorizedBooking._id);
+    assert.equal(refundCalls.length, 1);
+    assert.equal(refundCalls[0].bookingId, heldBooking._id);
+
+    // All three bookings — authorized, held, and never-charged — land on the
+    // new listing_deleted status, regardless of which Stripe path (if any) ran.
+    assert.equal(statusUpdates.length, 3);
+    assert.ok(statusUpdates.every((u) => u.status === 'listing_deleted'));
+  } finally {
+    Listing.findOne = originalFindOne;
+    Booking.countDocuments = originalBookingCount;
+    Booking.find = originalBookingFind;
+    Booking.updateOne = originalBookingUpdateOne;
+    Listing.deleteOne = originalDeleteOne;
+    paymentsService.cancelAuthorizationForBooking = originalCancelAuth;
+    paymentsService.executeStripeRefund = originalExecuteRefund;
+  }
+});
+
+test('a single booking failure during cascade-cancel does not abort the rest', async () => {
+  const hostId = new mongoose.Types.ObjectId().toString();
+  const listingId = new mongoose.Types.ObjectId().toString();
+
+  const failingBooking = { _id: new mongoose.Types.ObjectId(), paymentStatus: 'held', bookedBy: new mongoose.Types.ObjectId().toString(), listing: listingId };
+  const okBooking = { _id: new mongoose.Types.ObjectId(), paymentStatus: 'authorized', bookedBy: new mongoose.Types.ObjectId().toString(), listing: listingId };
+
+  const originalBookingFind = Booking.find;
+  const originalBookingUpdateOne = Booking.updateOne;
+  const originalCancelAuth = paymentsService.cancelAuthorizationForBooking;
+  const originalExecuteRefund = paymentsService.executeStripeRefund;
+
+  const statusUpdates = [];
+
+  Booking.find = async () => [failingBooking, okBooking];
+  Booking.updateOne = async (filter, update) => {
+    statusUpdates.push(filter._id.toString());
+    return { modifiedCount: 1 };
+  };
+  paymentsService.executeStripeRefund = async () => { throw new Error('Stripe unavailable'); };
+  paymentsService.cancelAuthorizationForBooking = async () => ({ booking: okBooking, isHost: true });
+
+  try {
+    const result = await bookingsService.cancelBookingsForDeletedListing(listingId, hostId);
+    assert.equal(result.totalCount, 2);
+    assert.equal(result.processedCount, 1);
+    assert.equal(statusUpdates.length, 1);
+    assert.equal(statusUpdates[0], okBooking._id.toString());
+  } finally {
+    Booking.find = originalBookingFind;
+    Booking.updateOne = originalBookingUpdateOne;
+    paymentsService.cancelAuthorizationForBooking = originalCancelAuth;
+    paymentsService.executeStripeRefund = originalExecuteRefund;
   }
 });

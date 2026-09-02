@@ -339,6 +339,13 @@ async function googleAuthenticate(payload) {
     return buildAuthResponse(user);
   }
 
+  if (payload.mode === 'login') {
+    throw new ApiError(
+      404,
+      'No account found for this Google account. Please sign up first.'
+    );
+  }
+
   const role = payload.role || USER_ROLES.USER;
 
   user = await User.create({
