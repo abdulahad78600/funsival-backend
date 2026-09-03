@@ -5,8 +5,10 @@ const { USER_ROLES } = require('../../constants/roles');
 const { upload } = require('../../services/do-spaces.upload');
 const {
   savePreferencesHandler,
+  dismissUserOnboardingHandler,
   updateProviderProfileHandler,
   becomeProviderHandler,
+  becomeUserHandler,
   updateUserProfileHandler,
   uploadProfilePictureHandler,
   listAdminUsersHandler,
@@ -18,6 +20,7 @@ const {
 const router = express.Router();
 
 router.post('/preferences', authenticate, savePreferencesHandler);
+router.post('/preferences/dismiss', authenticate, dismissUserOnboardingHandler);
 router.patch(
   '/profile',
   authenticate,
@@ -33,6 +36,11 @@ router.post(
   '/become-provider',
   authenticate,
   becomeProviderHandler
+);
+router.post(
+  '/become-user',
+  authenticate,
+  becomeUserHandler
 );
 router.post(
   '/profile-picture',

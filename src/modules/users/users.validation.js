@@ -223,15 +223,19 @@ function validateAdminUserUpdatePayload(payload = {}) {
   return validatedPayload;
 }
 
+// agencyName presence is enforced by the caller (becomeProvider), which only
+// requires it the first time a user becomes a provider — an existing agencyName
+// carries over on later provider/user role switches.
 function validateBecomeProviderPayload(payload = {}) {
-  const agencyName = validateOptionalString(payload.agencyName, 'agencyName', {
-    maxLength: 150,
-    allowEmpty: true,
-  });
+  const agencyName = normalizeString(payload.agencyName);
 
-  return {
-    ...(agencyName ? { agencyName } : {}),
-  };
+  if (agencyName && agencyName.length > 150) {
+    throw new ApiError(400, 'Validation failed.', {
+      agencyName: 'agencyName must be 150 characters or fewer.',
+    });
+  }
+
+  return { agencyName };
 }
 
 module.exports = {

@@ -21,8 +21,22 @@ const {
 async function saveUserPreferences(userId, preferences) {
   const user = await User.findByIdAndUpdate(
     userId,
-    { preferences },
+    { preferences, hasCompletedUserOnboarding: true },
     { new: true, runValidators: true }
+  );
+
+  if (!user) {
+    throw new ApiError(404, 'User not found.');
+  }
+
+  return user;
+}
+
+async function dismissUserOnboarding(userId) {
+  const user = await User.findByIdAndUpdate(
+    userId,
+    { hasCompletedUserOnboarding: true },
+    { new: true }
   );
 
   if (!user) {
@@ -118,11 +132,43 @@ async function becomeProvider(userId, payload) {
     throw new ApiError(400, 'You are already a provider.');
   }
 
+  // Only require agencyName the first time — a returning provider (switching
+  // back from user) keeps the agencyName they set previously.
+  if (!user.agencyName && !validatedPayload.agencyName) {
+    throw new ApiError(400, 'Validation failed.', {
+      agencyName: 'agencyName is required.',
+    });
+  }
+
   user.role = USER_ROLES.HOST;
   if (validatedPayload.agencyName) {
     user.agencyName = validatedPayload.agencyName;
   }
 
+  await user.save();
+
+  return {
+    token: generateAuthToken(user),
+    user: user.toJSON(),
+  };
+}
+
+async function becomeUser(userId) {
+  const user = await User.findById(userId);
+
+  if (!user) {
+    throw new ApiError(404, 'User not found.');
+  }
+
+  if (user.role === USER_ROLES.USER) {
+    throw new ApiError(400, 'You are already a user.');
+  }
+
+  if (user.role === USER_ROLES.ADMIN) {
+    throw new ApiError(400, 'Admins cannot switch to a user role.');
+  }
+
+  user.role = USER_ROLES.USER;
   await user.save();
 
   return {
@@ -637,8 +683,10 @@ async function deleteUserForAdmin(userId, actingAdminId) {
 
 module.exports = {
   saveUserPreferences,
+  dismissUserOnboarding,
   updateProviderProfile,
   becomeProvider,
+  becomeUser,
   updateUserProfile,
   updateUserProfileImage,
   listUsersForAdmin,

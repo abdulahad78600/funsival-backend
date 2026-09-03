@@ -205,8 +205,9 @@ function validateListingPayload(payload = {}) {
   const brand = normalizeString(serviceDetails.brand);
   const model = normalizeString(serviceDetails.model);
   const parkingSpace = normalizeString(serviceDetails.parkingSpace);
-  const minRentalTime = normalizeString(serviceDetails.minRentalTime);
-  const maxRentalTime = normalizeString(serviceDetails.maxRentalTime);
+  // Minimum/Maximum Rental Time — temporarily hidden from the listing wizard (step 3), revisit before re-enabling
+  // const minRentalTime = normalizeString(serviceDetails.minRentalTime);
+  // const maxRentalTime = normalizeString(serviceDetails.maxRentalTime);
   const amenities = normalizeOptionalStringArray(serviceDetails.amenities, 'amenities');
 
   if (isActivity) {
@@ -290,8 +291,7 @@ function validateListingPayload(payload = {}) {
         ? {
             parkingSpace,
             amenities,
-            minRentalTime,
-            maxRentalTime,
+            // minRentalTime, maxRentalTime — temporarily hidden, see above
             ...(Number.isFinite(maxParticipants) && maxParticipants > 0 ? { maxParticipants } : {}),
           }
         : {}),
