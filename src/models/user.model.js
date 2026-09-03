@@ -154,6 +154,12 @@ const userSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
+    // Set the first time this account completes (or dismisses) the user-role
+    // onboarding preferences screen, so later provider<->user switches never show it again.
+    hasCompletedUserOnboarding: {
+      type: Boolean,
+      default: false,
+    },
     email: {
       type: String,
       required: [true, 'Email is required.'],

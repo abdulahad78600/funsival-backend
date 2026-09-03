@@ -3,8 +3,10 @@ const ApiError = require('../../utils/api-error');
 const { uploadFileToSpaces } = require('../../services/do-spaces.upload');
 const {
   saveUserPreferences,
+  dismissUserOnboarding,
   updateProviderProfile,
   becomeProvider,
+  becomeUser,
   updateUserProfile,
   updateUserProfileImage,
   listUsersForAdmin,
@@ -25,6 +27,16 @@ const savePreferencesHandler = asyncHandler(async (req, res) => {
   });
 });
 
+const dismissUserOnboardingHandler = asyncHandler(async (req, res) => {
+  await dismissUserOnboarding(req.user.id);
+
+  res.status(200).json({
+    success: true,
+    message: 'Onboarding dismissed.',
+    data: null,
+  });
+});
+
 const updateProviderProfileHandler = asyncHandler(async (req, res) => {
   const user = await updateProviderProfile(req.user.id, req.body);
 
@@ -41,6 +53,16 @@ const becomeProviderHandler = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'You are now a provider on Funsival.',
+    data: result,
+  });
+});
+
+const becomeUserHandler = asyncHandler(async (req, res) => {
+  const result = await becomeUser(req.user.id);
+
+  res.status(200).json({
+    success: true,
+    message: 'You are now a user on Funsival.',
     data: result,
   });
 });
@@ -120,8 +142,10 @@ const deleteAdminUserHandler = asyncHandler(async (req, res) => {
 
 module.exports = {
   savePreferencesHandler,
+  dismissUserOnboardingHandler,
   updateProviderProfileHandler,
   becomeProviderHandler,
+  becomeUserHandler,
   updateUserProfileHandler,
   uploadProfilePictureHandler,
   listAdminUsersHandler,
