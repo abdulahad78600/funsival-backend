@@ -76,7 +76,7 @@ module.exports = {
       10,
       { min: 0, max: 100 }
     ),
-    payoutDelayDays: normalizeNumber(process.env.STRIPE_PAYOUT_DELAY_DAYS, 7, {
+    payoutDelayDays: normalizeNumber(process.env.STRIPE_PAYOUT_DELAY_DAYS, 1, {
       min: 0,
       max: 365,
       integer: true,

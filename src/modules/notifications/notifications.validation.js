@@ -10,6 +10,7 @@ const NOTIFICATION_TYPES = Object.freeze({
   BOOKING_DECLINED: 'booking_declined',
   BOOKING_CANCELLED: 'booking_cancelled',
   BOOKING_PAYOUT_RELEASED: 'booking_payout_released',
+  BOOKING_REVIEW_REMINDER: 'booking_review_reminder',
   BOOKING_STATUS_CHANGED: 'booking_status_changed',
   REFUND_REQUESTED: 'refund_requested',
   REFUND_APPROVED: 'refund_approved',

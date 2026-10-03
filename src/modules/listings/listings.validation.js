@@ -40,7 +40,7 @@ function normalizeOptionalStringArray(value, fieldName, normalizeItem = normaliz
 }
 
 function validateTime(value, fieldName) {
-  if (!/^\d{2}:\d{2}$/.test(value)) {
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) {
     throw new ApiError(400, 'Validation failed.', {
       [fieldName]: `${fieldName} must be in HH:MM format.`,
     });
@@ -152,10 +152,22 @@ function validateAvailability(availability = []) {
       throw new ApiError(400, 'Validation failed.', errors);
     }
 
+    const validatedStartTime = validateTime(startTime, `availability.${index}.startTime`);
+    const validatedEndTime = validateTime(endTime, `availability.${index}.endTime`);
+    const toMinutes = (time) => {
+      const [hours, minutes] = time.split(':').map(Number);
+      return hours * 60 + minutes;
+    };
+    if (toMinutes(validatedEndTime) <= toMinutes(validatedStartTime)) {
+      throw new ApiError(400, 'Validation failed.', {
+        [`availability.${index}.endTime`]: 'End time must be after start time.',
+      });
+    }
+
     return {
       date,
-      startTime: validateTime(startTime, `availability.${index}.startTime`),
-      endTime: validateTime(endTime, `availability.${index}.endTime`),
+      startTime: validatedStartTime,
+      endTime: validatedEndTime,
       isAvailable: typeof slot.isAvailable === 'boolean' ? slot.isAvailable : true,
     };
   });

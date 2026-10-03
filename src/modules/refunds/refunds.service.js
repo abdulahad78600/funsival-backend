@@ -1,5 +1,6 @@
 const Booking = require('../../models/booking.model');
 const RefundRequest = require('../../models/refund-request.model');
+const Review = require('../../models/review.model');
 const User = require('../../models/user.model');
 const ApiError = require('../../utils/api-error');
 const {
@@ -110,15 +111,20 @@ async function createRefundRequest(bookingId, guestId, { reason }) {
   if (booking.paymentStatus !== PAYMENT_STATUS.HELD) {
     throw new ApiError(
       400,
-      'Refunds can only be requested for paid bookings inside the 7-day hold window.'
+      'Refunds can only be requested for paid bookings during the payment hold.'
     );
   }
 
   if (!isHoldWindowOpen(booking)) {
     throw new ApiError(
       400,
-      'The 7-day refund window has passed. Funds have already been released to the provider.'
+      'The refund window has passed. Funds have already been released to the provider.'
     );
+  }
+
+  const reviewExists = await Review.exists({ booking: booking._id, reviewer: guestId });
+  if (reviewExists) {
+    throw new ApiError(400, 'Refunds cannot be requested after a review has been submitted.');
   }
 
   const existing = await RefundRequest.findOne({
@@ -294,7 +300,7 @@ async function approveRefundRequest(refundRequestId, adminUserId, { note } = {})
     );
     throw new ApiError(
       400,
-      'The 7-day hold window has passed and funds have already been released to the provider.'
+      'The payment hold has ended and funds have already been released to the provider.'
     );
   }
 

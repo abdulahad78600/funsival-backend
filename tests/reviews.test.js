@@ -19,10 +19,14 @@ function chainableQuery(result) {
   return query;
 }
 
-test('bookings are reviewable once confirmed or completed, never while pending/declined/cancelled', () => {
+test('bookings are reviewable only after they end and during the seven-day review window', () => {
   const { isBookingReviewable } = reviewsService._private;
-  assert.equal(isBookingReviewable({ status: 'confirmed' }), true);
-  assert.equal(isBookingReviewable({ status: 'completed' }), true);
+  const now = new Date('2026-10-02T12:00:00.000Z');
+  const ended = { startDate: '2026-10-01', endDate: '2026-10-01', endTime: '10:00', status: 'confirmed' };
+  assert.equal(isBookingReviewable(ended, now), false);
+  assert.equal(isBookingReviewable({ ...ended, status: 'completed' }, now), true);
+  assert.equal(isBookingReviewable({ ...ended, endDate: '2026-10-02', endTime: '14:00' }, now), false);
+  assert.equal(isBookingReviewable({ ...ended, endDate: '2026-09-20' }, now), false);
   assert.equal(isBookingReviewable({ status: 'pending' }), false);
   assert.equal(isBookingReviewable({ status: 'awaiting_host_approval' }), false);
   assert.equal(isBookingReviewable({ status: 'declined' }), false);
@@ -32,7 +36,8 @@ test('bookings are reviewable once confirmed or completed, never while pending/d
 test('review status tells the UI whether to show Write / Edit / nothing', () => {
   const { buildReviewStatus } = reviewsService._private;
   const guest = new mongoose.Types.ObjectId();
-  const booking = { bookedBy: guest, status: 'completed' };
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const booking = { bookedBy: guest, status: 'completed', startDate: yesterday, endDate: yesterday, endTime: '00:00' };
 
   const fresh = buildReviewStatus(booking, guest, null);
   assert.equal(fresh.canSubmit, true);
@@ -144,6 +149,9 @@ test('a guest can delete their own review; strangers and missing reviews are rej
     host: { _id: hostId },
     listing: { _id: listingId, toJSON: () => ({ id: listingId.toString(), photos: [] }) },
     status: 'completed',
+    startDate: new Date(Date.now() - 24 * 60 * 60 * 1000),
+    endDate: new Date(Date.now() - 24 * 60 * 60 * 1000),
+    endTime: '00:00',
   };
 
   const originalFindById = Booking.findById;

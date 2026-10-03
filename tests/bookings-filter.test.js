@@ -268,6 +268,11 @@ test('reservation stats supply all four KPI cards and tab totals', async () => {
       return [{ currentWeek: 5, previousWeek: 3 }];
     }
     if (match.paymentStatus) {
+      assert.deepEqual(match.status, { $in: ['confirmed', 'completed'] });
+      assert.deepEqual(match.paidAt, { $ne: null });
+      assert.equal(match.paymentStatus.$in.includes('authorized'), false);
+      assert.equal(match.paymentStatus.$in.includes('refunded'), false);
+      assert.deepEqual(pipeline[1].$project.amount, { $ifNull: ['$subtotal', 0] });
       return [{
         _id: 'USD',
         total: 1801,

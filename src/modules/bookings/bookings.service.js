@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 
 const Booking = require('../../models/booking.model');
+const RefundRequest = require('../../models/refund-request.model');
 const Listing = require('../../models/listing.model');
 const User = require('../../models/user.model');
 const ApiError = require('../../utils/api-error');
@@ -9,7 +10,7 @@ const {
   BOOKING_TYPES,
   BOOKING_STATUS,
   PAYMENT_STATUS,
-  SERVICE_FEE_AMOUNT,
+  SERVICE_FEE_RATE,
 } = require('../../constants/booking');
 const {
   LISTING_CATEGORIES,
@@ -20,6 +21,10 @@ const { attachReviewDataToBookings } = require('../reviews/reviews.service');
 const { buildNewBookingHostEmail } = require('./bookings.templates');
 const { sendNotification } = require('../notifications/notifications.service');
 const { NOTIFICATION_TYPES } = require('../notifications/notifications.validation');
+const {
+  completeEndedBookings,
+  getBookingCompletionAt,
+} = require('../../jobs/booking-completion');
 
 const HOST_REVENUE_PAYMENT_STATUSES = [
   PAYMENT_STATUS.HELD,
@@ -280,7 +285,8 @@ function calculateBookingPricing(payload, listing, bookingType) {
       : 0;
 
   const subtotal = Number((pricePerUnit * unitsBooked).toFixed(2));
-  const serviceFee = SERVICE_FEE_AMOUNT;
+  // Charge 10% of the booking subtotal for every listing category.
+  const serviceFee = Number((subtotal * SERVICE_FEE_RATE).toFixed(2));
   const totalAmount = Number((subtotal + serviceFee + deliveryFee).toFixed(2));
 
   return {
@@ -659,7 +665,32 @@ function guestReservationCountFacet() {
   return facet;
 }
 
+async function attachRefundStatusToBookings(bookings = []) {
+  if (!Array.isArray(bookings) || bookings.length === 0) return bookings;
+
+  const bookingIds = bookings.map((booking) => booking.id || booking._id).filter(Boolean);
+  const refundRequests = await RefundRequest.find({ booking: { $in: bookingIds } })
+    .sort({ createdAt: -1 })
+    .lean();
+  const latestByBooking = new Map();
+  for (const request of refundRequests) {
+    const bookingId = request.booking?.toString();
+    if (bookingId && !latestByBooking.has(bookingId)) latestByBooking.set(bookingId, request);
+  }
+
+  return bookings.map((booking) => {
+    const request = latestByBooking.get((booking.id || booking._id).toString());
+    return {
+      ...booking,
+      refundStatus: request
+        ? { status: request.status, note: request.decisionNote || null }
+        : null,
+    };
+  });
+}
+
 async function getBookingsForGuest(userId, { page = 1, limit = 10, tab = 'all' } = {}) {
+  await completeEndedBookings();
   const skip = (page - 1) * limit;
   const normalizedTab = typeof tab === 'string' ? tab.trim().toLowerCase() : 'all';
   if (!GUEST_RESERVATION_TABS.includes(normalizedTab)) {
@@ -702,7 +733,9 @@ async function getBookingsForGuest(userId, { page = 1, limit = 10, tab = 'all' }
     cancelled: count('cancelled'),
   };
 
-  const serializedBookings = bookings.map((booking) => booking.toJSON());
+  const serializedBookings = await attachRefundStatusToBookings(
+    bookings.map((booking) => booking.toJSON())
+  );
 
   return {
     bookings: await attachReviewDataToBookings(serializedBookings, userId),
@@ -879,6 +912,7 @@ async function getBookingsForHost(
   hostId,
   { page = 1, limit = 10, tab = 'all', date = null, search = '' } = {}
 ) {
+  await completeEndedBookings();
   const skip = (page - 1) * limit;
   const now = new Date();
   const { commonFilter, filter, normalizedTab, trimmedSearch } =
@@ -908,7 +942,7 @@ async function getBookingsForHost(
   const total = counts[normalizedTab];
 
   return {
-    bookings: bookings.map((booking) => booking.toJSON()),
+    bookings: await attachRefundStatusToBookings(bookings.map((booking) => booking.toJSON())),
     pagination: buildPagination(total, page, limit),
     filters: {
       tab: normalizedTab,
@@ -1080,13 +1114,14 @@ async function getHostReservationStats(hostId) {
           $match: {
             host: normalizedHostId,
             paidAt: { $ne: null },
+            status: { $in: [BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.COMPLETED] },
             paymentStatus: { $in: HOST_REVENUE_PAYMENT_STATUSES },
           },
         },
         {
           $project: {
             currency: { $toUpper: { $ifNull: ['$currency', 'USD'] } },
-            amount: { $ifNull: ['$merchantAmount', 0] },
+            amount: { $ifNull: ['$subtotal', 0] },
             paidAt: 1,
           },
         },
@@ -1288,9 +1323,16 @@ async function getBookingByIdForUser(bookingId, userId) {
     throw new ApiError(403, 'You are not allowed to view this booking.');
   }
 
+  const completedAt = getBookingCompletionAt(booking);
+  if (booking.status === BOOKING_STATUS.CONFIRMED && completedAt && completedAt <= new Date()) {
+    booking.status = BOOKING_STATUS.COMPLETED;
+    await booking.save();
+  }
+
   await paymentsService.reconcileProcessingBooking(booking);
 
-  const [serializedBooking] = await attachReviewDataToBookings([booking.toJSON()], userId);
+  const [bookingWithRefundStatus] = await attachRefundStatusToBookings([booking.toJSON()]);
+  const [serializedBooking] = await attachReviewDataToBookings([bookingWithRefundStatus], userId);
   return serializedBooking;
 }
 
@@ -1313,6 +1355,13 @@ async function cancelBooking(bookingId, userId) {
   }
 
   if (booking.status === BOOKING_STATUS.COMPLETED) {
+    throw new ApiError(400, 'Completed bookings cannot be cancelled.');
+  }
+
+  const completedAt = getBookingCompletionAt(booking);
+  if (booking.status === BOOKING_STATUS.CONFIRMED && completedAt && completedAt <= new Date()) {
+    booking.status = BOOKING_STATUS.COMPLETED;
+    await booking.save();
     throw new ApiError(400, 'Completed bookings cannot be cancelled.');
   }
 
@@ -1506,9 +1555,11 @@ module.exports = {
   RESERVATION_TABS,
   IN_PROGRESS_STATUSES,
   _private: {
+    calculateBookingPricing,
     buildReservationStatusFilter,
     buildGuestReservationStatusFilter,
     buildReservationDateFilter,
+    attachRefundStatusToBookings,
     readReservationCounts,
     startOfUtcWeek,
     rate,
