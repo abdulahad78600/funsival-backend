@@ -120,21 +120,39 @@ function serializeReview(review) {
   };
 }
 
-function isBookingReviewable(booking) {
-  if (!booking) return false;
+const REVIEW_WINDOW_DAYS = 7;
 
-  return ![
-    BOOKING_STATUS.PENDING,
-    BOOKING_STATUS.AWAITING_HOST_APPROVAL,
-    BOOKING_STATUS.DECLINED,
-    BOOKING_STATUS.CANCELLED,
-  ].includes(booking.status);
+function getBookingCompletionAt(booking) {
+  if (!booking) return null;
+  const date = new Date(booking.endDate || booking.startDate);
+  if (Number.isNaN(date.getTime())) return null;
+
+  const match = /^(\d{2}):(\d{2})$/.exec(String(booking.endTime || '23:59'));
+  date.setUTCHours(match ? Number(match[1]) : 23, match ? Number(match[2]) : 59, 0, 0);
+  return date;
+}
+
+function getReviewWindow(booking) {
+  const opensAt = getBookingCompletionAt(booking);
+  if (!opensAt) return { opensAt: null, closesAt: null };
+  return {
+    opensAt,
+    closesAt: new Date(opensAt.getTime() + REVIEW_WINDOW_DAYS * 24 * 60 * 60 * 1000),
+  };
+}
+
+function isBookingReviewable(booking, now = new Date()) {
+  if (!booking || booking.status !== BOOKING_STATUS.COMPLETED) return false;
+
+  const { opensAt, closesAt } = getReviewWindow(booking);
+  return Boolean(opensAt && closesAt && now >= opensAt && now <= closesAt);
 }
 
 function buildReviewStatus(booking, viewerUserId, review) {
   const bookedById = extractId(booking.bookedBy);
   const isGuest = bookedById === viewerUserId.toString();
   const bookingReviewable = isBookingReviewable(booking);
+  const { opensAt, closesAt } = getReviewWindow(booking);
   const hasSubmitted = Boolean(review);
 
   return {
@@ -148,6 +166,8 @@ function buildReviewStatus(booking, viewerUserId, review) {
         : 'booking_not_reviewable',
     reviewId: review ? extractId(review) : '',
     submittedAt: review && review.createdAt ? review.createdAt : null,
+    reviewOpensAt: opensAt,
+    reviewClosesAt: closesAt,
   };
 }
 
@@ -305,7 +325,7 @@ async function submitBookingReview(bookingId, userId, payload) {
   if (!isBookingReviewable(booking)) {
     throw new ApiError(
       400,
-      'This booking is not ready for review yet. Reviews can only be submitted for active or completed reservations.'
+      `This booking is not eligible for review. Reviews open after the activity ends and close ${REVIEW_WINDOW_DAYS} days later.`
     );
   }
 
@@ -447,6 +467,9 @@ module.exports = {
   listHostReviews,
   _private: {
     isBookingReviewable,
+    getBookingCompletionAt,
+    getReviewWindow,
+    REVIEW_WINDOW_DAYS,
     buildReviewStatus,
     buildRatingDistribution,
   },

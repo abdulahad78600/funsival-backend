@@ -121,7 +121,7 @@ test('dashboard overview returns every card and panel required by the host dashb
       addedThisMonth: 2,
     });
     assert.deepEqual(overview.cards.reservations, { total: 12, pending: 2 });
-    assert.deepEqual(overview.cards.completed, { total: 6, successRate: 75 });
+    assert.deepEqual(overview.cards.pendingPayments, [{ currency: 'USD', amount: 1000 }]);
     assert.equal(overview.recentReservations[0].listing.title, 'ATV Quad Bike');
     assert.equal(overview.listingPerformance.completed.percentage, 50);
     assert.equal(overview.listingPerformance.pending.percentage, 33.33);

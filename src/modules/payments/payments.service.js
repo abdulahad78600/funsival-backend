@@ -51,19 +51,15 @@ function fromStripeAmount(amount, currency) {
   return Number(amount) / 100;
 }
 
-function calculateApplicationFee(totalAmount, currency) {
-  const configuredPercent = Number(env.stripe.applicationFeePercent);
-  const percent = Math.min(
-    100,
-    Math.max(0, Number.isFinite(configuredPercent) ? configuredPercent : 10)
-  ) / 100;
-  const fee = Number(totalAmount) * percent;
+function calculateApplicationFee(totalAmount, currency, percent = env.stripe.applicationFeePercent) {
+  const normalizedPercent = Math.min(100, Math.max(0, Number(percent) || 0)) / 100;
+  const fee = Number(totalAmount) * normalizedPercent;
   return toStripeAmount(fee, currency);
 }
 
-function calculatePaymentSplit(totalAmount, currency) {
+function calculatePaymentSplit(totalAmount, currency, applicationFeePercent = env.stripe.applicationFeePercent) {
   const total = toStripeAmount(totalAmount, currency);
-  const applicationFee = Math.min(total, calculateApplicationFee(totalAmount, currency));
+  const applicationFee = Math.min(total, calculateApplicationFee(totalAmount, currency, applicationFeePercent));
   return {
     total,
     applicationFee,
@@ -71,9 +67,20 @@ function calculatePaymentSplit(totalAmount, currency) {
   };
 }
 
-function calculatePayoutEligibleAt(paidAt, delayDays = env.stripe.payoutDelayDays) {
-  const paidAtDate = paidAt instanceof Date ? paidAt : new Date(paidAt);
-  return new Date(paidAtDate.getTime() + delayDays * DAY_IN_MS);
+function calculateBookingCompletionAt(booking) {
+  const dateValue = booking.endDate || booking.startDate;
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return new Date();
+
+  const time = booking.endTime || '23:59';
+  const match = /^(\d{2}):(\d{2})$/.exec(String(time));
+  date.setUTCHours(match ? Number(match[1]) : 23, match ? Number(match[2]) : 59, 0, 0);
+  return date;
+}
+
+function calculatePayoutEligibleAt(completedAt, delayDays = env.stripe.payoutDelayDays) {
+  const completionDate = completedAt instanceof Date ? completedAt : new Date(completedAt);
+  return new Date(completionDate.getTime() + delayDays * DAY_IN_MS);
 }
 
 function isPayoutEligible(payoutEligibleAt, now = new Date()) {
@@ -425,7 +432,12 @@ async function authorizeBookingPayment(bookingId, guestUser, paymentMethodId) {
   }
 
   const currency = (booking.currency || 'USD').toLowerCase();
-  const split = calculatePaymentSplit(booking.totalAmount, currency);
+  const listing = await Listing.findById(booking.listing).select('category');
+  const total = toStripeAmount(booking.totalAmount, currency);
+  // The guest-facing platform fee is already included in the booking total.
+  // Keep exactly that amount on the platform for every listing category.
+  const applicationFee = Math.min(total, toStripeAmount(booking.serviceFee, currency));
+  const split = { total, applicationFee, merchant: Math.max(0, total - applicationFee) };
 
   const paymentIntent = await stripe.paymentIntents.create(
     {
@@ -529,7 +541,8 @@ async function markBookingPaid(booking, paymentIntent) {
   }
 
   const paidAt = new Date();
-  const payoutEligibleAt = calculatePayoutEligibleAt(paidAt);
+  // Hold provider funds for the configured delay after the reservation ends.
+  const payoutEligibleAt = calculatePayoutEligibleAt(calculateBookingCompletionAt(booking));
 
   booking.paymentStatus = PAYMENT_STATUS.HELD;
   applyPaymentFlowMetadata(booking, paymentIntent);
@@ -559,7 +572,7 @@ async function markBookingPaid(booking, paymentIntent) {
   sendNotification(booking.host, {
     type: NOTIFICATION_TYPES.BOOKING_ACCEPTED,
     title: 'Booking accepted',
-    body: `Payment of ${booking.currency} ${booking.totalAmount} captured. Funds will be paid out after the ${env.stripe.payoutDelayDays}-day hold.`,
+    body: `Payment of ${booking.currency} ${booking.totalAmount} captured. Funds become eligible for release ${env.stripe.payoutDelayDays} day${env.stripe.payoutDelayDays === 1 ? '' : 's'} after the reservation ends.`,
     data: {
       bookingId: booking._id.toString(),
       listingId: booking.listing ? booking.listing.toString() : '',
@@ -1545,6 +1558,7 @@ async function getMerchantBalance(userId) {
       entry.pending = entry.held + entry.stripePending;
       return {
         currency: entry.currency,
+        payoutDelayDays: env.stripe.payoutDelayDays,
         pending: fromStripeAmount(entry.pending, entry.currency),
         current: fromStripeAmount(entry.current, entry.currency),
         breakdown: {
@@ -1793,6 +1807,7 @@ async function releaseBookingFunds(bookingId) {
     booking.paymentStatus = PAYMENT_STATUS.RELEASED;
     booking.stripeTransferId = transfer ? transfer.id : null;
     booking.releasedAt = new Date();
+    booking.status = BOOKING_STATUS.COMPLETED;
     await booking.save();
 
     sendNotification(booking.host, {
@@ -2061,6 +2076,7 @@ module.exports = {
     toStripeAmount,
     fromStripeAmount,
     calculatePaymentSplit,
+    calculateBookingCompletionAt,
     calculatePayoutEligibleAt,
     isPayoutEligible,
     getEarningsWindow,

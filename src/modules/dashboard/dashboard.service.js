@@ -7,11 +7,13 @@ const {
   PAYMENT_STATUS,
 } = require('../../constants/booking');
 
-const EARNING_STATUSES = [
+// Funds are earnings only after the reserved activity has finished and the
+// merchant transfer has been released. Captured/held funds remain pending.
+const EARNING_STATUSES = [PAYMENT_STATUS.RELEASED];
+const PENDING_PAYMENT_STATUSES = [
   PAYMENT_STATUS.HELD,
   PAYMENT_STATUS.REFUNDING,
   PAYMENT_STATUS.RELEASING,
-  PAYMENT_STATUS.RELEASED,
 ];
 
 function round(value, precision = 2) {
@@ -110,11 +112,19 @@ async function getHostDashboardOverview(
   };
   if (currency) earningsMatch.currency = currency;
 
+  const pendingPaymentsMatch = {
+    host: hostId,
+    paidAt: { $ne: null },
+    paymentStatus: { $in: PENDING_PAYMENT_STATUSES },
+  };
+  if (currency) pendingPaymentsMatch.currency = currency;
+
   const [
     activeListings,
     activeListingsAddedThisMonth,
     reservationStatusRows,
     earningRows,
+    pendingPaymentRows,
     recentBookings,
   ] = await Promise.all([
     Listing.countDocuments({ createdBy: hostId, isActive: true }),
@@ -133,7 +143,7 @@ async function getHostDashboardOverview(
         $project: {
           currency: { $toUpper: { $ifNull: ['$currency', 'USD'] } },
           merchantAmount: { $ifNull: ['$merchantAmount', 0] },
-          paidAt: 1,
+          earnedAt: { $ifNull: ['$releasedAt', '$paidAt'] },
         },
       },
       {
@@ -145,8 +155,8 @@ async function getHostDashboardOverview(
               $cond: [
                 {
                   $and: [
-                    { $gte: ['$paidAt', currentQuarterStart] },
-                    { $lt: ['$paidAt', nextQuarterStart] },
+                    { $gte: ['$earnedAt', currentQuarterStart] },
+                    { $lt: ['$earnedAt', nextQuarterStart] },
                   ],
                 },
                 '$merchantAmount',
@@ -159,8 +169,8 @@ async function getHostDashboardOverview(
               $cond: [
                 {
                   $and: [
-                    { $gte: ['$paidAt', previousQuarterStart] },
-                    { $lt: ['$paidAt', currentQuarterStart] },
+                    { $gte: ['$earnedAt', previousQuarterStart] },
+                    { $lt: ['$earnedAt', currentQuarterStart] },
                   ],
                 },
                 '$merchantAmount',
@@ -170,6 +180,17 @@ async function getHostDashboardOverview(
           },
         },
       },
+      { $sort: { _id: 1 } },
+    ]),
+    Booking.aggregate([
+      { $match: pendingPaymentsMatch },
+      {
+        $project: {
+          currency: { $toUpper: { $ifNull: ['$currency', 'USD'] } },
+          merchantAmount: { $ifNull: ['$merchantAmount', 0] },
+        },
+      },
+      { $group: { _id: '$currency', total: { $sum: '$merchantAmount' } } },
       { $sort: { _id: 1 } },
     ]),
     Booking.find({ host: hostId })
@@ -196,13 +217,13 @@ async function getHostDashboardOverview(
     0
   );
   const openReservations = pendingReservations + confirmedReservations;
-  const decidedReservations = completedReservations + cancelledReservations;
   const bookedReservations = confirmedReservations + completedReservations;
 
   const currencies = currency
     ? [currency]
     : earningRows.map((row) => row._id);
   const earningsByCurrency = new Map(earningRows.map((row) => [row._id, row]));
+  const pendingPaymentsByCurrency = new Map(pendingPaymentRows.map((row) => [row._id, row]));
   const totalEarnings = currencies.map((currencyCode) => {
     const row = earningsByCurrency.get(currencyCode) || {
       total: 0,
@@ -220,6 +241,13 @@ async function getHostDashboardOverview(
       ),
     };
   });
+  const pendingPayments = (currency ? [currency] : [...new Set([
+    ...earningRows.map((row) => row._id),
+    ...pendingPaymentRows.map((row) => row._id),
+  ])]).map((currencyCode) => ({
+    currency: currencyCode,
+    amount: round(pendingPaymentsByCurrency.get(currencyCode)?.total || 0),
+  }));
 
   return {
     generatedAt: now.toISOString(),
@@ -233,10 +261,7 @@ async function getHostDashboardOverview(
         total: totalReservations,
         pending: pendingReservations,
       },
-      completed: {
-        total: completedReservations,
-        successRate: percentage(completedReservations, decidedReservations),
-      },
+      pendingPayments,
     },
     recentReservations: recentBookings.map(mapRecentReservation),
     listingPerformance: {

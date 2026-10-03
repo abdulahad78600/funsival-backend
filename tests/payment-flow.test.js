@@ -6,6 +6,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 process.env.BREVO_API_KEY = process.env.BREVO_API_KEY || 'test-brevo-key';
 process.env.STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || 'sk_test_placeholder';
 process.env.STRIPE_APPLICATION_FEE_PERCENT = '10';
+process.env.STRIPE_PAYOUT_DELAY_DAYS = '1';
 
 const paymentsService = require('../src/modules/payments/payments.service');
 const {
@@ -23,12 +24,12 @@ const {
 } = paymentsService._private;
 
 test('payment split keeps the platform fee and merchant amount in minor units', () => {
-  const split = calculatePaymentSplit(108, 'USD');
+  const split = calculatePaymentSplit(108, 'USD', 20);
 
   assert.deepEqual(split, {
     total: 10800,
-    applicationFee: 1080,
-    merchant: 9720,
+    applicationFee: 2160,
+    merchant: 8640,
   });
   assert.equal(split.applicationFee + split.merchant, split.total);
 });
@@ -40,13 +41,41 @@ test('money conversion handles two-decimal and zero-decimal currencies', () => {
   assert.equal(fromStripeAmount(1234, 'JPY'), 1234);
 });
 
-test('merchant funds remain pending until exactly seven days after capture', () => {
-  const paidAt = new Date('2026-08-10T12:00:00.000Z');
-  const eligibleAt = calculatePayoutEligibleAt(paidAt, 7);
+test('merchant funds release one day after reservation completion, with a two-day option', () => {
+  const completedAt = paymentsService._private.calculateBookingCompletionAt({
+    startDate: '2026-08-09', endDate: '2026-08-10', endTime: '12:00',
+  });
+  const eligibleAt = calculatePayoutEligibleAt(completedAt);
 
-  assert.equal(eligibleAt.toISOString(), '2026-08-17T12:00:00.000Z');
-  assert.equal(isPayoutEligible(eligibleAt, '2026-08-17T11:59:59.999Z'), false);
-  assert.equal(isPayoutEligible(eligibleAt, '2026-08-17T12:00:00.000Z'), true);
+  assert.equal(eligibleAt.toISOString(), '2026-08-11T12:00:00.000Z');
+  assert.equal(isPayoutEligible(eligibleAt, completedAt), false);
+  assert.equal(isPayoutEligible(eligibleAt, '2026-08-11T11:59:59.999Z'), false);
+  assert.equal(isPayoutEligible(eligibleAt, '2026-08-11T12:00:00.000Z'), true);
+  assert.equal(calculatePayoutEligibleAt(completedAt, 2).toISOString(), '2026-08-12T12:00:00.000Z');
+});
+
+test('reservation completes at its end time while payout remains held', async () => {
+  const Booking = require('../src/models/booking.model');
+  const { completeEndedBookings } = require('../src/jobs/booking-completion');
+  const originalFind = Booking.find;
+  const originalUpdateOne = Booking.updateOne;
+  const updated = [];
+  Booking.find = () => ({ limit: async () => [
+    { _id: 'ended', endDate: '2026-08-10', endTime: '12:00', payoutEligibleAt: new Date('2026-08-11T12:00:00Z') },
+    { _id: 'ongoing', endDate: '2026-08-10', endTime: '14:00', payoutEligibleAt: new Date('2026-08-11T14:00:00Z') },
+  ] });
+  Booking.updateOne = async (filter, update) => {
+    updated.push(filter._id);
+    assert.equal(update.$set.status, 'completed');
+    return { modifiedCount: 1 };
+  };
+  try {
+    assert.equal(await completeEndedBookings(new Date('2026-08-10T12:00:00Z')), 1);
+    assert.deepEqual(updated, ['ended']);
+  } finally {
+    Booking.find = originalFind;
+    Booking.updateOne = originalUpdateOne;
+  }
 });
 
 test('withdrawals require positive funds, a currency, and an idempotency key', () => {

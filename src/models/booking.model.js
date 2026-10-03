@@ -166,6 +166,10 @@ const bookingSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    reviewReminderSentAt: {
+      type: Date,
+      default: null,
+    },
     acceptedAt: {
       type: Date,
       default: null,

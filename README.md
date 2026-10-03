@@ -407,9 +407,10 @@ New booking payments use Stripe separate charges and transfers:
 
 1. The guest's card is authorized when the booking is submitted.
 2. The charge is captured when the host accepts the booking.
-3. The merchant's net amount remains on the platform for
-   `STRIPE_PAYOUT_DELAY_DAYS` (7 days by default).
-4. A refund request submitted during those 7 days freezes the merchant transfer
+3. The merchant's net amount remains on the platform until the reservation ends
+   plus `STRIPE_PAYOUT_DELAY_DAYS` (1 day by default for testing; set to 2 for 48 hours).
+   This schedule is saved when payment is captured; existing bookings keep their saved release dates.
+4. A refund request submitted before release freezes the merchant transfer
    until an admin approves or rejects it.
 5. An approved request refunds the guest. A rejected request is released at the
    end of the hold, or immediately if the hold has already ended.
