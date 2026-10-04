@@ -20,6 +20,11 @@ Funsival now has a scalable Express + MongoDB auth API with support for two role
    npm start
    ```
 
+The backend is configured for port `3000`. For local development alongside a
+frontend also running on port `3000`, override the backend with `PORT=4000` in `.env`.
+Set the frontend's `NEXT_PUBLIC_API_URL=http://localhost:4000/api/v1` and
+restart its development server. The frontend uses port `3000`.
+
 ## Project Structure
 
 ```text
