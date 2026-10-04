@@ -25,6 +25,12 @@ frontend also running on port `3000`, override the backend with `PORT=4000` in `
 Set the frontend's `NEXT_PUBLIC_API_URL=http://localhost:4000/api/v1` and
 restart its development server. The frontend uses port `3000`.
 
+In deployment, both services can use internal port `3000` when running in
+separate containers or on separate hosts. Set `PORT=3000` for the backend and
+frontend services. Configure the frontend's `NEXT_PUBLIC_API_URL` at build time
+to the public HTTPS backend URL ending in `/api/v1`, and configure the backend's
+`API_BASE_URL` and `FRONTEND_URL` with their public origins.
+
 ## Project Structure
 
 ```text
