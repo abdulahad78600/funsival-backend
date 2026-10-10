@@ -22,6 +22,34 @@ function chainableQuery(result) {
   return query;
 }
 
+test('browse price bounds and sorting use only the selected pricing mode', async () => {
+  const originalFind = Listing.find;
+  const originalCount = Listing.countDocuments;
+  let filter;
+  let sort;
+  Listing.find = value => {
+    filter = value;
+    const query = chainableQuery([]);
+    query.sort = value => { sort = value; return query; };
+    return query;
+  };
+  Listing.countDocuments = async () => 0;
+  try {
+    for (const mode of ['daily', 'hourly', 'perPerson']) {
+      await listingsService.browseListings({ pricingMode: mode, minPrice: 100, maxPrice: 250, sort: 'price-asc' });
+      assert.deepEqual(filter[`price.${mode}`], { $gt: 0, $gte: 100, $lte: 250 });
+      assert.deepEqual(sort, { [`price.${mode}`]: 1 });
+      assert.ok(!filter.$and?.some(clause => clause.$or?.some(item => item['price.hourly'])));
+      await listingsService.browseListings({ pricingMode: mode });
+      assert.deepEqual(filter[`price.${mode}`], { $gt: 0 });
+    }
+    await assert.rejects(() => listingsService.browseListings({ pricingMode: 'unknown' }), /Invalid pricing mode/);
+  } finally {
+    Listing.find = originalFind;
+    Listing.countDocuments = originalCount;
+  }
+});
+
 test('public browse, detail, and slots only expose active listings', async () => {
   const originalFind = Listing.find;
   const originalCount = Listing.countDocuments;
@@ -48,8 +76,7 @@ test('public browse, detail, and slots only expose active listings', async () =>
     await assert.rejects(() => listingsService.getListingById(id), /Listing not found/);
     assert.equal(filters.findOne._id, id);
     assert.equal(filters.findOne.isActive, true);
-    assert.ok(filters.findOne.availability.$elemMatch.date.$gte instanceof Date);
-    assert.deepEqual(filters.findOne.availability.$elemMatch.isAvailable, { $ne: false });
+    assert.ok(filters.findOne.$expr.$anyElementTrue);
 
     filters.findOne = undefined;
     await assert.rejects(
@@ -61,6 +88,52 @@ test('public browse, detail, and slots only expose active listings', async () =>
     Listing.find = originalFind;
     Listing.countDocuments = originalCount;
     Listing.findOne = originalFindOne;
+  }
+});
+
+test('public browse matches category aliases and multiple types across all listing categories', async () => {
+  const originalFind = Listing.find;
+  const originalCount = Listing.countDocuments;
+  let filter;
+  Listing.find = (value) => {
+    filter = value;
+    return chainableQuery([]);
+  };
+  Listing.countDocuments = async () => 0;
+
+  try {
+    for (const [category, storedCategory, type] of [
+      ['activities', 'activity', 'snowboarding'],
+      ['activity', 'activity', 'surfing'],
+      ['places', 'place', 'beach'],
+      ['place', 'place', 'mountain'],
+      ['equipment', 'equipment', 'bikes'],
+      ['equipments', 'equipment', 'kayak'],
+    ]) {
+      await listingsService.browseListings({ category, type });
+      assert.ok(filter.category.test(storedCategory), `${category} should match ${storedCategory}`);
+      assert.equal(filter.category.test('other'), false);
+      assert.equal(filter.type, type);
+      assert.equal(filter.isActive, true);
+      assert.ok(filter.availability.$elemMatch.date.$gte instanceof Date);
+    }
+
+    await listingsService.browseListings({ category: 'Activities, Places, Equipment', type: 'surfing, snowboarding, beach, bikes' });
+    for (const category of ['activity', 'place', 'equipment']) {
+      assert.ok(filter.category.$in.some(regex => regex.test(category)));
+    }
+    assert.deepEqual(filter.type, { $in: ['surfing', 'snowboarding', 'beach', 'bikes'] });
+
+    await listingsService.browseListings({ category: 'place.*' });
+    assert.equal(filter.category.test('place'), false);
+    assert.equal(filter.category.test('place.*'), true);
+
+    await listingsService.browseListings();
+    assert.equal(filter.category, undefined);
+    assert.equal(filter.type, undefined);
+  } finally {
+    Listing.find = originalFind;
+    Listing.countDocuments = originalCount;
   }
 });
 

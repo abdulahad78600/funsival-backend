@@ -22,9 +22,10 @@ test('revenue categories collapse listing categories into the three legend bucke
   assert.equal(resolveRevenueCategoryBucket('Place'), 'places');
   assert.equal(resolveRevenueCategoryBucket('places'), 'places');
   assert.equal(resolveRevenueCategoryBucket('Equipment'), 'equipments');
-  assert.equal(resolveRevenueCategoryBucket('service'), 'services');
-  assert.equal(resolveRevenueCategoryBucket('activity'), 'services');
-  assert.equal(resolveRevenueCategoryBucket('mystery'), 'other');
+  assert.equal(resolveRevenueCategoryBucket('service'), 'activities');
+  assert.equal(resolveRevenueCategoryBucket('activity'), 'activities');
+  assert.equal(resolveRevenueCategoryBucket('mystery'), null);
+  assert.equal(resolveRevenueCategoryBucket(''), null);
 });
 
 test('earnings overview returns a Jan-Dec trend and revenue-by-category shares', async () => {
@@ -40,6 +41,7 @@ test('earnings overview returns a Jan-Dec trend and revenue-by-category shares',
         { _id: { currency: 'USD', category: 'place' }, grossEarnings: 600, platformFees: 18, netEarnings: 582, bookingCount: 6 },
         { _id: { currency: 'USD', category: 'equipment' }, grossEarnings: 300, platformFees: 9, netEarnings: 291, bookingCount: 3 },
         { _id: { currency: 'USD', category: 'activity' }, grossEarnings: 100, platformFees: 3, netEarnings: 97, bookingCount: 1 },
+        { _id: { currency: 'USD', category: '' }, grossEarnings: 500, platformFees: 15, netEarnings: 485, bookingCount: 5 },
       ];
     }
     return [
@@ -60,6 +62,18 @@ test('earnings overview returns a Jan-Dec trend and revenue-by-category shares',
     assert.equal(match.paidAt.$gte.toISOString(), '2026-01-01T00:00:00.000Z');
     assert.equal(match.paidAt.$lt.toISOString(), '2027-01-01T00:00:00.000Z');
 
+    // Deleted listings retain their original category in the booking snapshot.
+    const categoryPipeline = pipelines.find((pipeline) => pipeline.some((stage) => stage.$lookup));
+    const categoryProjection = categoryPipeline.find((stage) => stage.$project).$project.category;
+    assert.deepEqual(categoryProjection, {
+      $toLower: {
+        $ifNull: [
+          { $arrayElemAt: ['$listingDoc.category', 0] },
+          { $ifNull: ['$listingSnapshot.category', ''] },
+        ],
+      },
+    });
+
     const [trend] = overview.trend.series;
     assert.equal(trend.currency, 'USD');
     assert.equal(trend.points.length, 12);
@@ -78,8 +92,8 @@ test('earnings overview returns a Jan-Dec trend and revenue-by-category shares',
     assert.equal(byCategory.total, 970);
     assert.deepEqual(byCategory.categories.map((c) => [c.key, c.label, c.netEarnings, c.percentage]), [
       ['places', 'Places', 582, 60],
-      ['equipments', 'Equipments', 291, 30],
-      ['services', 'Services', 97, 10],
+      ['equipments', 'Equipment', 291, 30],
+      ['activities', 'Activity', 97, 10],
     ]);
   } finally {
     Booking.aggregate = originalAggregate;
@@ -100,7 +114,7 @@ test('earnings overview with no data still returns zero-filled months and bucket
     assert.equal(overview.revenueByCategory.series[0].total, 0);
     assert.deepEqual(
       overview.revenueByCategory.series[0].categories.map((c) => [c.key, c.percentage]),
-      [['places', 0], ['equipments', 0], ['services', 0]]
+      [['places', 0], ['equipments', 0], ['activities', 0]]
     );
   } finally {
     Booking.aggregate = originalAggregate;

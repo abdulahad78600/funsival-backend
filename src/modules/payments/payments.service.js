@@ -1075,8 +1075,8 @@ const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'S
 // Fixed donut buckets matching the Earnings screen legend.
 const REVENUE_CATEGORY_BUCKETS = [
   { key: 'places', label: 'Places' },
-  { key: 'equipments', label: 'Equipments' },
-  { key: 'services', label: 'Services' },
+  { key: 'equipments', label: 'Equipment' },
+  { key: 'activities', label: 'Activity' },
 ];
 
 function resolveRevenueCategoryBucket(category) {
@@ -1089,9 +1089,9 @@ function resolveRevenueCategoryBucket(category) {
     normalized === 'activity' ||
     normalized === 'activities'
   ) {
-    return 'services';
+    return 'activities';
   }
-  return 'other';
+  return null;
 }
 
 function emptyTrendPoint(year, monthIndex) {
@@ -1177,7 +1177,10 @@ async function getEarningsOverview(userId, { year, currency = null } = {}) {
           ...moneyProject,
           category: {
             $toLower: {
-              $ifNull: [{ $arrayElemAt: ['$listingDoc.category', 0] }, ''],
+              $ifNull: [
+                { $arrayElemAt: ['$listingDoc.category', 0] },
+                { $ifNull: ['$listingSnapshot.category', ''] },
+              ],
             },
           },
         },
@@ -1199,6 +1202,7 @@ async function getEarningsOverview(userId, { year, currency = null } = {}) {
     const code = row._id.currency;
     if (!categoryByCurrency.has(code)) categoryByCurrency.set(code, new Map());
     const bucketKey = resolveRevenueCategoryBucket(row._id.category);
+    if (!bucketKey) continue;
     const buckets = categoryByCurrency.get(code);
     const bucket = buckets.get(bucketKey) || {
       grossEarnings: 0,
@@ -1261,15 +1265,11 @@ async function getEarningsOverview(userId, { year, currency = null } = {}) {
 
   const categorySeries = currencyCodes.map((code) => {
     const buckets = categoryByCurrency.get(code) || new Map();
-    const bucketKeys = [
-      ...REVENUE_CATEGORY_BUCKETS,
-      ...(buckets.has('other') ? [{ key: 'other', label: 'Other' }] : []),
-    ];
     const total = Array.from(buckets.values()).reduce(
       (sum, bucket) => sum + bucket.netEarnings,
       0
     );
-    const categories = bucketKeys.map(({ key, label }) => {
+    const categories = REVENUE_CATEGORY_BUCKETS.map(({ key, label }) => {
       const bucket = buckets.get(key) || {
         grossEarnings: 0,
         platformFees: 0,
@@ -1361,6 +1361,23 @@ async function listTransactions(
     paymentStatus: { $in: EARNING_TRANSACTION_STATUSES },
   };
   const withdrawalMatch = { host: hostId };
+  // Discover currencies across this host's full history, before filtering or
+  // pagination, so the UI only offers currencies with actual transactions.
+  const availableCurrenciesPipeline = [
+    { $match: { ...bookingMatch } },
+    { $project: { currency: { $toUpper: { $ifNull: ['$currency', 'USD'] } } } },
+    {
+      $unionWith: {
+        coll: Withdrawal.collection.name,
+        pipeline: [
+          { $match: { ...withdrawalMatch } },
+          { $project: { currency: { $toUpper: '$currency' } } },
+        ],
+      },
+    },
+    { $group: { _id: '$currency' } },
+    { $sort: { _id: 1 } },
+  ];
   if (currency) {
     bookingMatch.currency = currency;
     withdrawalMatch.currency = currency;
@@ -1404,7 +1421,11 @@ async function listTransactions(
     }
   );
 
-  const [result = { transactions: [], metadata: [] }] = await model.aggregate(pipeline);
+  const [transactionResults, currencyRows] = await Promise.all([
+    model.aggregate(pipeline),
+    Booking.aggregate(availableCurrenciesPipeline),
+  ]);
+  const [result = { transactions: [], metadata: [] }] = transactionResults;
   const rows = result.transactions || [];
   const listingIds = rows
     .filter((row) => row.transactionType === 'earning' && row.listing)
@@ -1489,6 +1510,7 @@ async function listTransactions(
   const total = result.metadata && result.metadata[0] ? result.metadata[0].total : 0;
   return {
     transactions,
+    availableCurrencies: currencyRows.map((row) => row._id).filter((code) => /^[A-Z]{3}$/.test(code)),
     pagination: buildTransactionPagination(total, page, limit),
   };
 }

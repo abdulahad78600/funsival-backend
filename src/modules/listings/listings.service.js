@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { listingClock, calendarDate, isCalendarDate, isFutureStart, upcomingAvailabilityExpression } = require('../../utils/booking-clock');
 
 const Listing = require('../../models/listing.model');
 const DraftListing = require('../../models/draft-listing.model');
@@ -29,9 +30,12 @@ const {
 
 function mergeListingPayload(existingListing, payload) {
   const currentListing = existingListing.toObject({ depopulate: true });
+  const locationChanged = ['country', 'state', 'city', 'latitude', 'longitude'].some(key =>
+    payload.placeLocation?.[key] !== undefined && payload.placeLocation[key] !== currentListing.placeLocation?.[key]);
 
   return {
     category: payload.category ?? currentListing.category,
+    timeZone: payload.timeZone ?? (locationChanged ? undefined : currentListing.timeZone),
     type: payload.type ?? currentListing.type,
     basicInformation: {
       ...currentListing.basicInformation,
@@ -164,7 +168,7 @@ async function ensureHostStripeConnected(userId) {
 async function createListing(payload, userId) {
   await ensureHostStripeConnected(userId);
 
-  const validatedPayload = validateListingPayload(payload);
+  const validatedPayload = validateListingPayload(payload, { rejectPastAvailability: true });
 
   const listing = await Listing.create({
     ...validatedPayload,
@@ -189,15 +193,15 @@ function compareTimeStrings(a, b) {
 
 // First upcoming availability slot (today or later) — drives the
 // "Availability" column in the listings table.
-function resolveNextAvailability(availability = []) {
+function resolveNextAvailability(availability = [], listing = {}) {
   if (!Array.isArray(availability) || availability.length === 0) return null;
 
-  const todayStart = startOfUtcDay(new Date()).getTime();
+  const clock = listingClock(listing);
   const upcoming = availability
     .filter((slot) => {
       if (!slot || slot.isAvailable === false || !slot.date) return false;
       const time = new Date(slot.date).getTime();
-      return !Number.isNaN(time) && startOfUtcDay(new Date(time)).getTime() >= todayStart;
+      return !Number.isNaN(time) && isFutureStart(slot.date, slot.endTime, clock);
     })
     .sort((a, b) => {
       const dateDiff = new Date(a.date).getTime() - new Date(b.date).getTime();
@@ -219,7 +223,7 @@ function serializeHostListing(listing) {
     ...record,
     status: listing.isActive ? 'active' : 'inactive',
     isDraft: false,
-    nextAvailability: resolveNextAvailability(record.availability),
+    nextAvailability: resolveNextAvailability(record.availability, record),
   };
 }
 
@@ -435,11 +439,7 @@ async function setListingActiveStatus(listingId, userId, isActive) {
 async function deactivateExpiredListings({ limit = 200 } = {}) {
   const expiredListings = await Listing.find({
     isActive: true,
-    availability: {
-      $not: {
-        $elemMatch: { date: { $gte: startOfUtcDay(new Date()) }, isAvailable: { $ne: false } },
-      },
-    },
+    $expr: { $not: [upcomingAvailabilityExpression()] },
   })
     .select('_id')
     .limit(limit);
@@ -472,7 +472,7 @@ async function getListingForUser(listingId, userId) {
 function parseDateOnly(value, fieldName) {
   if (value === undefined || value === null || value === '') return null;
   const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
+  if (!isCalendarDate(value)) {
     throw new ApiError(400, `\`${fieldName}\` must be a valid date (YYYY-MM-DD).`);
   }
   return parsed;
@@ -500,8 +500,8 @@ function buildLocationOrClause(location) {
 }
 
 // Shared by browseListings/getBrowseTypes/getBrowseDestinations: at least one
-// open availability slot in range, clamped to today-or-later, narrowed
-// further when an explicit from/until is supplied.
+// open availability slot in range. This indexed coarse bound is combined
+// with the exact listing-local cutoff in upcomingAvailabilityExpression.
 function buildAvailabilityElemMatch(from, until) {
   const fromDate = parseDateOnly(from, 'from');
   const untilDate = parseDateOnly(until, 'until');
@@ -509,6 +509,9 @@ function buildAvailabilityElemMatch(from, until) {
     throw new ApiError(400, '`until` must be on or after `from`.');
   }
   const todayStart = startOfUtcDay(new Date());
+  // The listing's current day can still be yesterday in UTC-negative zones.
+  // The exact local cutoff is enforced by the shared $expr below.
+  todayStart.setUTCDate(todayStart.getUTCDate() - 1);
   const dateRange = {
     $gte: fromDate && fromDate > todayStart ? startOfUtcDay(fromDate) : todayStart,
   };
@@ -533,6 +536,7 @@ async function browseListings({
   search,
   minPrice,
   maxPrice,
+  pricingMode,
   sort,
   viewerId = null,
 } = {}) {
@@ -548,24 +552,28 @@ async function browseListings({
   if (locationOrClause) andClauses.push(locationOrClause);
 
   // Landing "From / Until" boxes: at least one open availability slot in range.
-  // Always requires at least one upcoming (today or later) slot, narrowed
-  // further whenever the visitor supplies an explicit from/until — this is
-  // also what keeps listings with fully-expired availability out of browse.
+  // Combine a coarse date bound with the listing-local cutoff, on the same
+  // slot, so expired availability cannot satisfy an explicit date range.
   filter.availability = buildAvailabilityElemMatch(from, until);
+  filter.$expr = upcomingAvailabilityExpression(from, until);
 
   if (category) {
     const categories = String(category)
       .split(',')
-      .map((value) => value.trim())
+      .map(normalizeCategory)
       .filter(Boolean);
     if (categories.length === 1) {
-      filter.category = new RegExp(`^${categories[0]}$`, 'i');
+      filter.category = new RegExp(`^${escapeRegex(categories[0])}$`, 'i');
     } else if (categories.length > 1) {
-      filter.category = { $in: categories.map((value) => new RegExp(`^${value}$`, 'i')) };
+      filter.category = { $in: categories.map((value) => new RegExp(`^${escapeRegex(value)}$`, 'i')) };
     }
   }
 
-  if (type) filter.type = type;
+  if (type) {
+    const types = String(type).split(',').map((value) => value.trim()).filter(Boolean);
+    if (types.length === 1) filter.type = types[0];
+    else if (types.length > 1) filter.type = { $in: types };
+  }
   if (city) filter['placeLocation.city'] = new RegExp(`^${city}$`, 'i');
 
   if (search) {
@@ -590,11 +598,16 @@ async function browseListings({
 
   const min = minPrice !== undefined && minPrice !== '' ? Number(minPrice) : null;
   const max = maxPrice !== undefined && maxPrice !== '' ? Number(maxPrice) : null;
-  if ((min !== null && !Number.isNaN(min)) || (max !== null && !Number.isNaN(max))) {
-    const priceRange = {};
+  if (pricingMode && !['hourly', 'daily', 'perPerson'].includes(pricingMode)) {
+    throw new ApiError(400, 'Invalid pricing mode. Use hourly, daily, or perPerson.');
+  }
+  if (pricingMode || (min !== null && !Number.isNaN(min)) || (max !== null && !Number.isNaN(max))) {
+    const priceRange = pricingMode ? { $gt: 0 } : {};
     if (min !== null && !Number.isNaN(min)) priceRange.$gte = min;
     if (max !== null && !Number.isNaN(max)) priceRange.$lte = max;
-    filter.$and = [
+    if (pricingMode) {
+      filter[`price.${pricingMode}`] = priceRange;
+    } else filter.$and = [
       ...(filter.$and || []),
       {
         $or: [
@@ -612,7 +625,9 @@ async function browseListings({
     'price-asc': { 'price.perPerson': 1, 'price.hourly': 1, 'price.daily': 1 },
     'price-desc': { 'price.perPerson': -1, 'price.hourly': -1, 'price.daily': -1 },
   };
-  const sortOption = sortMap[sort] || sortMap.newest;
+  const sortOption = pricingMode && (sort === 'price-asc' || sort === 'price-desc')
+    ? { [`price.${pricingMode}`]: sort === 'price-asc' ? 1 : -1 }
+    : sortMap[sort] || sortMap.newest;
 
   const [listings, total] = await Promise.all([
     Listing.find(filter)
@@ -661,6 +676,7 @@ async function getBrowseTypes({ category, limit = 20, location, from, until } = 
   if (from || until) {
     match.availability = buildAvailabilityElemMatch(from, until);
   }
+  match.$expr = upcomingAvailabilityExpression(from, until);
 
   const rows = await Listing.aggregate([
     { $match: match },
@@ -695,6 +711,7 @@ async function getBrowseDestinations({ limit = 12, location, from, until } = {})
   if (from || until) {
     match.availability = buildAvailabilityElemMatch(from, until);
   }
+  match.$expr = upcomingAvailabilityExpression(from, until);
 
   const rows = await Listing.aggregate([
     { $match: match },
@@ -742,9 +759,7 @@ async function getListingById(listingId, { viewerId = null } = {}) {
   const listing = await Listing.findOne({
     _id: listingId,
     isActive: true,
-    availability: {
-      $elemMatch: { date: { $gte: startOfUtcDay(new Date()) }, isAvailable: { $ne: false } },
-    },
+    $expr: upcomingAvailabilityExpression(),
   }).populate('createdBy', 'email role agencyName city');
 
   if (!listing) {
@@ -831,7 +846,7 @@ async function getBookedIntervalsForDate(listingId, dayStart) {
 
 async function getAvailableSlotsForListing(listingId, dateInput) {
   const requestedDate = new Date(dateInput);
-  if (!dateInput || Number.isNaN(requestedDate.getTime())) {
+  if (!isCalendarDate(dateInput)) {
     throw new ApiError(400, 'A valid `date` query parameter is required (YYYY-MM-DD).');
   }
 
@@ -841,6 +856,10 @@ async function getAvailableSlotsForListing(listingId, dateInput) {
   }
 
   const dayStart = startOfUtcDay(requestedDate);
+  const clock = listingClock(listing);
+  if (calendarDate(requestedDate) < clock.date) {
+    throw new ApiError(400, 'The selected date is in the past in the listing time zone.');
+  }
   const windows = (listing.availability || []).filter(
     (entry) =>
       entry.isAvailable !== false &&
@@ -883,7 +902,7 @@ async function getAvailableSlotsForListing(listingId, dateInput) {
         endTime: minutesToTimeString(slotEnd),
         durationMinutes: slotDurationMinutes,
         price: pricePerSlot,
-        available: !isBooked,
+        available: !isBooked && isFutureStart(dayStart, minutesToTimeString(slotStart), clock),
       });
     }
   }
@@ -894,6 +913,7 @@ async function getAvailableSlotsForListing(listingId, dateInput) {
 
   return {
     listingId: listing._id.toString(),
+    timeZone: clock.timeZone,
     date: dayStart.toISOString().slice(0, 10),
     slotDurationMinutes,
     hourlyPrice,

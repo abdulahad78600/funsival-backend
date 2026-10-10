@@ -65,8 +65,9 @@ test('landing search: location + date range map to placeLocation and availabilit
 
     // No explicit from/until still requires at least one upcoming slot, not any slot.
     await listingsService.browseListings({});
-    const todayStr = toDateOnly(new Date());
-    assert.equal(received.availability.$elemMatch.date.$gte.toISOString(), `${todayStr}T00:00:00.000Z`);
+    const earliestDay = toDateOnly(addDays(-1));
+    assert.equal(received.availability.$elemMatch.date.$gte.toISOString(), `${earliestDay}T00:00:00.000Z`);
+    assert.ok(received.$expr.$anyElementTrue, 'the listing-local cutoff is enforced in addition to the coarse date bound');
     assert.equal(received.availability.$elemMatch.date.$lt, undefined);
 
     await assert.rejects(
