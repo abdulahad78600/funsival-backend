@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const app = require('./app');
 const config = require('./config/env');
 const connectDatabase = require('./config/database');
+const { backfillListingTimeZones } = require('./jobs/listing-time-zones');
 const { startBookingAuthExpiryJob } = require('./jobs/booking-auth-expiry');
 const { startBookingPayoutReleaseJob } = require('./jobs/booking-payout-release');
 const { startListingExpiryJob } = require('./jobs/listing-expiry');
@@ -14,6 +15,7 @@ let server;
 async function startServer() {
   try {
     await connectDatabase();
+    await backfillListingTimeZones();
 
     server = app.listen(config.port, () => {
       console.log(`Server running on http://localhost:${config.port}`);

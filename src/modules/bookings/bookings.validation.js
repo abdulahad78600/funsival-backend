@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const ApiError = require('../../utils/api-error');
 const { AVAILABLE_BOOKING_TYPES } = require('../../constants/booking');
+const { isCalendarDate } = require('../../utils/booking-clock');
 
 const HOST_RESERVATION_TABS = [
   'all',
@@ -20,17 +21,7 @@ function isValidObjectId(value) {
 }
 
 function isValidDate(value) {
-  if (typeof value !== 'string' && !(value instanceof Date)) {
-    return false;
-  }
-  const date = new Date(value);
-  return !Number.isNaN(date.getTime());
-}
-
-function startOfUtcDay(date) {
-  const result = new Date(date);
-  result.setUTCHours(0, 0, 0, 0);
-  return result;
+  return isCalendarDate(value);
 }
 
 function isValidTime(value) {
@@ -227,8 +218,6 @@ function validateCreateBookingPayload(payload = {}) {
     errors.startDate = 'Start date is required.';
   } else if (!isValidDate(startDate)) {
     errors.startDate = 'Start date is invalid.';
-  } else if (startOfUtcDay(new Date(startDate)) < startOfUtcDay(new Date())) {
-    errors.startDate = 'Start date cannot be in the past.';
   }
 
   if (endDate && !isValidDate(endDate)) {

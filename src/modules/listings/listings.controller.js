@@ -114,7 +114,7 @@ const getListingByIdHandler = asyncHandler(async (req, res) => {
 const browseListingsHandler = asyncHandler(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
-  const { hostId, category, type, city, location, from, until, search, minPrice, maxPrice, sort } =
+  const { hostId, category, type, city, location, from, until, search, minPrice, maxPrice, pricingMode, sort } =
     req.query;
 
   const result = await browseListings({
@@ -130,6 +130,7 @@ const browseListingsHandler = asyncHandler(async (req, res) => {
     search,
     minPrice,
     maxPrice,
+    pricingMode,
     sort,
     viewerId: req.user ? req.user.id : null,
   });

@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 
 const ApiError = require('../../utils/api-error');
 const { normalizeListingPhotoReference } = require('./listing-images');
+const { validTimeZone, resolveListingTimeZone, isCalendarDate, listingClock } = require('../../utils/booking-clock');
 
 function normalizeString(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -122,7 +123,7 @@ function validatePrice(price = {}, errors) {
   };
 }
 
-function validateAvailability(availability = []) {
+function validateAvailability(availability = [], minimumDate = null) {
   if (!Array.isArray(availability) || availability.length === 0) {
     throw new ApiError(400, 'Validation failed.', {
       availability: 'Availability must be a non-empty array.',
@@ -133,8 +134,10 @@ function validateAvailability(availability = []) {
     const errors = {};
 
     const date = new Date(slot.date);
-    if (!slot.date || isNaN(date.getTime())) {
+    if (!isCalendarDate(slot.date)) {
       errors[`availability.${index}.date`] = 'Availability date must be a valid date (e.g. 2026-04-26).';
+    } else if (minimumDate && date.toISOString().slice(0, 10) < minimumDate) {
+      errors[`availability.${index}.date`] = 'The selected date has already passed. Please choose today or a later date.';
     }
 
     const startTime = normalizeString(slot.startTime);
@@ -173,7 +176,7 @@ function validateAvailability(availability = []) {
   });
 }
 
-function validateListingPayload(payload = {}) {
+function validateListingPayload(payload = {}, { rejectPastAvailability = false, now = new Date() } = {}) {
   const category = normalizeString(payload.category);
   const type = normalizeString(payload.type);
   const basicInformation = payload.basicInformation || {};
@@ -271,6 +274,9 @@ function validateListingPayload(payload = {}) {
   if (longitude !== undefined && !Number.isFinite(longitude)) {
     errors.longitude = 'Longitude must be a valid number.';
   }
+  if (payload.timeZone !== undefined && !validTimeZone(payload.timeZone)) {
+    errors.timeZone = 'Time zone must be a valid IANA time zone.';
+  }
 
   const validatedPrice = validatePrice(price, errors);
 
@@ -278,9 +284,12 @@ function validateListingPayload(payload = {}) {
     throw new ApiError(400, 'Validation failed.', errors);
   }
 
+  const timeZone = payload.timeZone || resolveListingTimeZone({ placeLocation: { ...placeLocation, latitude, longitude } });
+  const minimumDate = rejectPastAvailability ? listingClock({ timeZone }, now).date : null;
   return {
     category,
     type,
+    timeZone,
     basicInformation: {
       activityTitle,
       location,
@@ -320,7 +329,7 @@ function validateListingPayload(payload = {}) {
       googleMapsUrl: normalizeString(placeLocation.googleMapsUrl),
     },
     photos: normalizeStringArray(payload.photos, 'photos', normalizeListingPhotoReference),
-    availability: validateAvailability(payload.availability),
+    availability: validateAvailability(payload.availability, minimumDate),
     price: validatedPrice,
   };
 }

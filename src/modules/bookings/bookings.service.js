@@ -5,6 +5,7 @@ const RefundRequest = require('../../models/refund-request.model');
 const Listing = require('../../models/listing.model');
 const User = require('../../models/user.model');
 const ApiError = require('../../utils/api-error');
+const { assertBookingNotPast } = require('../../utils/booking-clock');
 const { sendMail } = require('../../services/mail.service');
 const {
   BOOKING_TYPES,
@@ -489,7 +490,11 @@ async function buildBookingQuote(payload, userId) {
   }
 
   validateBookingInputsForType(payload, listing, bookingType);
+  // Daily pricing strips the time fields below, but a supplied local start
+  // time still must be upcoming before that normalization happens.
+  assertBookingNotPast(listing, payload);
   const resolved = expandBookingTimes(payload, bookingType);
+  assertBookingNotPast(listing, resolved);
   await ensureHourlyBookingIsAvailable(listing, resolved, bookingType);
   const pricing = calculateBookingPricing(resolved, listing, bookingType);
 
@@ -541,6 +546,7 @@ async function createBooking(payload, userId) {
   const numberOfGuests =
     bookingType === BOOKING_TYPES.PER_PERSON ? resolved.numberOfGuests : null;
 
+  assertBookingNotPast(listing, resolved);
   const booking = await Booking.create({
     listing: listing._id,
     listingSnapshot: {

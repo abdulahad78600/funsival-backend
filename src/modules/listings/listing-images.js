@@ -7,6 +7,8 @@ const { apiBaseUrl } = require('../../config/env');
 const DraftListing = require('../../models/draft-listing.model');
 const Listing = require('../../models/listing.model');
 const ApiError = require('../../utils/api-error');
+const { resolveListingTimeZone } = require('../../utils/booking-clock');
+const { resolveLocationCoordinates } = require('../../utils/location-coordinates');
 
 const LISTING_IMAGES_ROUTE = '/uploads/listings';
 const LISTING_IMAGES_DIRECTORY = path.join(process.cwd(), 'uploads', 'listings');
@@ -90,8 +92,11 @@ function serializeListingHost(createdBy) {
 }
 
 function serializeListingRecord(record = {}) {
+  const coordinates = resolveLocationCoordinates(record.placeLocation);
   const serialized = {
     ...record,
+    ...(record.placeLocation ? { placeLocation: { ...record.placeLocation, ...(coordinates || {}) } } : {}),
+    timeZone: resolveListingTimeZone(record),
     photos: Array.isArray(record.photos)
       ? record.photos.map((photo) => buildListingImagePublicUrl(photo)).filter(Boolean)
       : [],

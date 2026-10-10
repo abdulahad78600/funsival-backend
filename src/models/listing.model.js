@@ -225,6 +225,7 @@ const priceSchema = new mongoose.Schema(
 
 const listingSchema = new mongoose.Schema(
   {
+    timeZone: { type: String, trim: true },
     category: {
       type: String,
       trim: true,
