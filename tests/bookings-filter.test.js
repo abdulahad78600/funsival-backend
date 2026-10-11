@@ -67,22 +67,29 @@ test('guest reservation tabs accept UI labels and aliases', () => {
   const { validateGuestBookingsQuery } = require('../src/modules/bookings/bookings.validation');
 
   assert.equal(validateGuestBookingsQuery({}).tab, 'all');
-  for (const tab of ['all', 'in_progress', 'completed', 'cancelled']) {
+  for (const tab of ['all', 'upcoming', 'in_progress', 'completed', 'cancelled']) {
     assert.equal(validateGuestBookingsQuery({ tab }).tab, tab);
   }
   assert.equal(validateGuestBookingsQuery({ tab: 'In-Progress' }).tab, 'in_progress');
   assert.equal(validateGuestBookingsQuery({ tab: 'inprogress' }).tab, 'in_progress');
   assert.equal(validateGuestBookingsQuery({ tab: 'in progress' }).tab, 'in_progress');
-  assert.throws(() => validateGuestBookingsQuery({ tab: 'upcoming' }), /Invalid tab/);
+  assert.throws(() => validateGuestBookingsQuery({ tab: 'unknown' }), /Invalid tab/);
 });
 
 test('guest reservation tabs map to booking states', () => {
   const { buildGuestReservationStatusFilter } = bookingsService._private;
 
   assert.equal(buildGuestReservationStatusFilter('all'), null);
-  assert.deepEqual(buildGuestReservationStatusFilter('in_progress'), {
-    status: { $in: ['pending', 'awaiting_host_approval', 'confirmed'] },
+  const now = new Date('2026-10-11T12:00:00Z');
+  assert.deepEqual(buildGuestReservationStatusFilter('in_progress', now), {
+    status: 'confirmed', $expr: { $and: [
+      { $lte: ['$_reservationStartAt', now] }, { $gt: ['$_reservationEndAt', now] },
+    ] },
   });
+  assert.deepEqual(buildGuestReservationStatusFilter('upcoming', now), { $or: [
+    { status: { $in: ['pending', 'awaiting_host_approval'] } },
+    { status: 'confirmed', $expr: { $gt: ['$_reservationStartAt', now] } },
+  ] });
   assert.deepEqual(buildGuestReservationStatusFilter('completed'), { status: 'completed' });
   assert.deepEqual(buildGuestReservationStatusFilter('cancelled'), {
     status: { $in: ['cancelled', 'declined', 'listing_deleted'] },
@@ -114,7 +121,8 @@ test('guest reservation list applies the tab filter and returns tab counts', asy
     countPipeline = pipeline;
     return [{
       all: [{ count: 5 }],
-      in_progress: [{ count: 2 }],
+      upcoming: [{ count: 1 }],
+      in_progress: [{ count: 1 }],
       completed: [{ count: 2 }],
       cancelled: [{ count: 1 }],
     }];
@@ -128,25 +136,23 @@ test('guest reservation list applies the tab filter and returns tab counts', asy
       limit: 10,
     });
 
-    assert.deepEqual(bookingFilter, {
-      $and: [
-        { bookedBy: guestId },
-        { status: { $in: ['pending', 'awaiting_host_approval', 'confirmed'] } },
-      ],
-    });
+    assert.deepEqual(bookingFilter, { bookedBy: guestId, _id: { $in: [] } });
     assert.deepEqual(countPipeline[0].$match, { bookedBy: guestId });
-    assert.deepEqual(Object.keys(countPipeline[1].$facet), ['all', 'in_progress', 'completed', 'cancelled']);
+    const facet = countPipeline.at(-1).$facet;
+    assert.deepEqual(Object.keys(facet), ['all', 'upcoming', 'in_progress', 'completed', 'cancelled', 'bookings']);
+    assert.deepEqual(facet.bookings[0].$match.status, 'confirmed');
+    assert.deepEqual(facet.bookings.slice(-3), [{ $skip: 0 }, { $limit: 10 }, { $project: { _id: 1 } }]);
     assert.deepEqual(result.filters, {
       tab: 'in_progress',
-      counts: { all: 5, in_progress: 2, completed: 2, cancelled: 1 },
+      counts: { all: 5, upcoming: 1, in_progress: 1, completed: 2, cancelled: 1 },
     });
-    assert.equal(result.pagination.total, 2);
+    assert.equal(result.pagination.total, 1);
 
     await bookingsService.getBookingsForGuest(guestId.toString(), { tab: 'all' });
-    assert.deepEqual(bookingFilter, { bookedBy: guestId });
+    assert.deepEqual(bookingFilter, { bookedBy: guestId, _id: { $in: [] } });
 
     await assert.rejects(
-      () => bookingsService.getBookingsForGuest(guestId.toString(), { tab: 'upcoming' }),
+      () => bookingsService.getBookingsForGuest(guestId.toString(), { tab: 'unknown' }),
       /Invalid tab/
     );
   } finally {

@@ -641,19 +641,26 @@ async function declineBookingRequest(bookingId, hostUserId, reason) {
   return booking.toJSON();
 }
 
-// Guest "My Reservations" tabs. "In progress" is anything the guest is still
-// waiting on or attending: not yet finished, not cancelled/declined.
-const GUEST_RESERVATION_TABS = ['all', 'in_progress', 'completed', 'cancelled'];
+// Guest tabs use listing-local start/end instants before counting or pagination.
+const GUEST_RESERVATION_TABS = ['all', 'upcoming', 'in_progress', 'completed', 'cancelled'];
 const IN_PROGRESS_STATUSES = [
   BOOKING_STATUS.PENDING,
   BOOKING_STATUS.AWAITING_HOST_APPROVAL,
   BOOKING_STATUS.CONFIRMED,
 ];
 
-function buildGuestReservationStatusFilter(tab) {
+function buildGuestReservationStatusFilter(tab, now = new Date()) {
   switch (tab) {
+    case 'upcoming':
+      return { $or: [
+        { status: { $in: [BOOKING_STATUS.PENDING, BOOKING_STATUS.AWAITING_HOST_APPROVAL] } },
+        { status: BOOKING_STATUS.CONFIRMED, $expr: { $gt: ['$_reservationStartAt', now] } },
+      ] };
     case 'in_progress':
-      return { status: { $in: IN_PROGRESS_STATUSES } };
+      return { status: BOOKING_STATUS.CONFIRMED, $expr: { $and: [
+        { $lte: ['$_reservationStartAt', now] },
+        { $gt: ['$_reservationEndAt', now] },
+      ] } };
     case 'completed':
       return { status: BOOKING_STATUS.COMPLETED };
     case 'cancelled':
@@ -663,12 +670,29 @@ function buildGuestReservationStatusFilter(tab) {
   }
 }
 
-function guestReservationCountFacet() {
+function guestReservationCountFacet(now) {
   const facet = { all: [{ $count: 'count' }] };
   GUEST_RESERVATION_TABS.filter((tab) => tab !== 'all').forEach((tab) => {
-    facet[tab] = [{ $match: buildGuestReservationStatusFilter(tab) }, { $count: 'count' }];
+    facet[tab] = [{ $match: buildGuestReservationStatusFilter(tab, now) }, { $count: 'count' }];
   });
   return facet;
+}
+
+function guestReservationTimingStages() {
+  const zone = { $ifNull: [{ $arrayElemAt: ['$_reservationListing.timeZone', 0] }, 'UTC'] };
+  const instant = (date, time) => ({ $dateFromString: {
+    dateString: { $concat: [
+      { $dateToString: { date, format: '%Y-%m-%d', timezone: 'UTC' } }, 'T', time,
+    ] },
+    timezone: zone, onError: null, onNull: null,
+  } });
+  return [
+    { $lookup: { from: Listing.collection.name, localField: 'listing', foreignField: '_id', as: '_reservationListing' } },
+    { $set: {
+      _reservationStartAt: instant('$startDate', { $ifNull: [{ $min: '$slots.startTime' }, { $ifNull: ['$startTime', '00:00'] }] }),
+      _reservationEndAt: instant({ $ifNull: ['$endDate', '$startDate'] }, { $ifNull: [{ $max: '$slots.endTime' }, { $ifNull: ['$endTime', '23:59'] }] }),
+    } },
+  ];
 }
 
 async function attachRefundStatusToBookings(bookings = []) {
@@ -711,20 +735,25 @@ async function getBookingsForGuest(userId, { page = 1, limit = 10, tab = 'all' }
       ? userId
       : new mongoose.Types.ObjectId(String(userId));
   const commonFilter = { bookedBy: guestId };
-  const filter = combineReservationFilters(
-    commonFilter,
-    buildGuestReservationStatusFilter(normalizedTab)
-  );
-
-  const [bookings, [countResult = {}]] = await Promise.all([
-    Booking.find(filter)
-      .populate('listing')
-      .populate('host', 'email role agencyName city')
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit),
-    Booking.aggregate([{ $match: commonFilter }, { $facet: guestReservationCountFacet() }]),
+  const now = new Date();
+  const tabFilter = buildGuestReservationStatusFilter(normalizedTab, now);
+  const facet = guestReservationCountFacet(now);
+  facet.bookings = [
+    ...(tabFilter ? [{ $match: tabFilter }] : []),
+    { $sort: { createdAt: -1, _id: -1 } },
+    { $skip: skip }, { $limit: limit }, { $project: { _id: 1 } },
+  ];
+  const [countResult = {}] = await Booking.aggregate([
+    { $match: commonFilter },
+    ...guestReservationTimingStages(),
+    { $facet: facet },
   ]);
+  const bookings = await Booking.find({
+    ...commonFilter, _id: { $in: (countResult.bookings || []).map(booking => booking._id) },
+  })
+    .populate('listing')
+    .populate('host', 'email role agencyName city')
+    .sort({ createdAt: -1, _id: -1 });
 
   await paymentsService.reconcileProcessingBookings(bookings);
 
@@ -734,6 +763,7 @@ async function getBookingsForGuest(userId, { page = 1, limit = 10, tab = 'all' }
   };
   const counts = {
     all: count('all'),
+    upcoming: count('upcoming'),
     in_progress: count('in_progress'),
     completed: count('completed'),
     cancelled: count('cancelled'),

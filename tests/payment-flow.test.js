@@ -60,7 +60,7 @@ test('reservation completes at its end time while payout remains held', async ()
   const originalFind = Booking.find;
   const originalUpdateOne = Booking.updateOne;
   const updated = [];
-  Booking.find = () => ({ limit: async () => [
+  Booking.find = () => ({ populate() { return this; }, limit: async () => [
     { _id: 'ended', endDate: '2026-08-10', endTime: '12:00', payoutEligibleAt: new Date('2026-08-11T12:00:00Z') },
     { _id: 'ongoing', endDate: '2026-08-10', endTime: '14:00', payoutEligibleAt: new Date('2026-08-11T14:00:00Z') },
   ] });

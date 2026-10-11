@@ -93,6 +93,12 @@ function assertBookingNotPast(listing, booking, now = new Date()) {
   }
 }
 
+function hasBookingDatePassed(booking, listing = booking.listing, now = new Date()) {
+  const start = new Date(booking.startDate);
+  if (Number.isNaN(start.getTime())) return false;
+  return calendarDate(start) < listingClock(listing || {}, now).date;
+}
+
 // MongoDB uses the persisted listing zone, including daylight-saving rules,
 // so pagination/counts and automatic expiry share the booking cutoff.
 function upcomingAvailabilityExpression(from, until) {
@@ -114,4 +120,4 @@ function upcomingAvailabilityExpression(from, until) {
   } }] };
 }
 
-module.exports = { validTimeZone, calendarDate, isCalendarDate, resolveListingTimeZone, listingClock, localBookingInstant, isFutureStart, assertBookingNotPast, upcomingAvailabilityExpression };
+module.exports = { validTimeZone, calendarDate, isCalendarDate, resolveListingTimeZone, listingClock, localBookingInstant, isFutureStart, assertBookingNotPast, hasBookingDatePassed, upcomingAvailabilityExpression };
