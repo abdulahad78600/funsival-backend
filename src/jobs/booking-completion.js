@@ -1,30 +1,28 @@
 const Booking = require("../models/booking.model");
 const { BOOKING_STATUS } = require("../constants/booking");
+const { calendarDate, resolveListingTimeZone, localBookingInstant } = require('../utils/booking-clock');
 
-const RUN_INTERVAL_MS = 5 * 60 * 1000;
+const RUN_INTERVAL_MS = 60 * 1000;
 
 function getBookingCompletionAt(booking) {
   const date = new Date(booking?.endDate || booking?.startDate);
   if (Number.isNaN(date.getTime())) return null;
 
-  const match = /^(\d{2}):(\d{2})$/.exec(String(booking?.endTime || "23:59"));
-  date.setUTCHours(
-    match ? Number(match[1]) : 23,
-    match ? Number(match[2]) : 59,
-    0,
-    0,
-  );
-  return date;
+  const endTime = booking.slots?.length
+    ? booking.slots.map(slot => slot.endTime).filter(Boolean).sort().at(-1)
+    : booking.endTime;
+  return localBookingInstant(calendarDate(date), endTime || '23:59', resolveListingTimeZone(booking.listing || {}));
 }
 
 async function completeEndedBookings(now = new Date()) {
+  const candidateCutoff = new Date(now.getTime() + 24 * 60 * 60 * 1000);
   const candidates = await Booking.find({
     status: BOOKING_STATUS.CONFIRMED,
     $or: [
-      { endDate: { $lte: now } },
-      { endDate: null, startDate: { $lte: now } },
+      { endDate: { $lte: candidateCutoff } },
+      { endDate: null, startDate: { $lte: candidateCutoff } },
     ],
-  }).limit(500);
+  }).populate('listing', 'timeZone placeLocation').limit(500);
 
   let completed = 0;
   for (const booking of candidates) {

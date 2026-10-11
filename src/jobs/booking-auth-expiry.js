@@ -6,8 +6,9 @@ const {
 const paymentsService = require('../modules/payments/payments.service');
 const { sendNotification } = require('../modules/notifications/notifications.service');
 const { NOTIFICATION_TYPES } = require('../modules/notifications/notifications.validation');
+const { hasBookingDatePassed } = require('../utils/booking-clock');
 
-const RUN_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+const RUN_INTERVAL_MS = 60 * 1000;
 const EXPIRY_BUFFER_MS = 12 * 60 * 60 * 1000; // act 12h before Stripe auto-voids
 const REMINDER_WINDOW_MS = 36 * 60 * 60 * 1000; // remind starting 36h before expiry
 const STALE_UNPAID_MAX_AGE_MS = 30 * 60 * 1000; // give abandoned checkouts 30 min
@@ -48,40 +49,54 @@ async function remindHostsOfPendingAuthorizations() {
   }
 }
 
-async function expirePendingAuthorizations() {
-  const cutoff = new Date(Date.now() + EXPIRY_BUFFER_MS);
+async function expirePendingAuthorizations(now = new Date()) {
+  const cutoff = new Date(now.getTime() + EXPIRY_BUFFER_MS);
 
   const bookings = await Booking.find({
     status: BOOKING_STATUS.AWAITING_HOST_APPROVAL,
     paymentStatus: PAYMENT_STATUS.AUTHORIZED,
-    authExpiresAt: { $lte: cutoff },
-  }).limit(50);
+    $or: [
+      { authExpiresAt: { $lte: cutoff } },
+      // Include all possible local dates; the exact cutoff is checked below.
+      { startDate: { $lte: new Date(now.getTime() + 24 * 60 * 60 * 1000) } },
+    ],
+  }).populate('listing', 'timeZone placeLocation').sort({ startDate: 1 }).limit(500);
 
   for (const booking of bookings) {
+    const datePassed = hasBookingDatePassed(booking, booking.listing, now);
+    const authorizationExpiring = booking.authExpiresAt && booking.authExpiresAt <= cutoff;
+    if (!datePassed && !authorizationExpiring) continue;
+    const listingId = (booking.listing?._id || booking.listing?.id || booking.listing)?.toString() || '';
     try {
       await paymentsService.cancelAuthorizationForBooking(
         booking._id,
         booking.host,
-        'Auto-declined: host did not respond in time.'
+        datePassed
+          ? 'Automatically rejected: booking date passed without provider acceptance.'
+          : 'Auto-declined: host did not respond in time.'
       );
 
       sendNotification(booking.bookedBy, {
         type: NOTIFICATION_TYPES.BOOKING_DECLINED,
-        title: 'Booking expired',
-        body: 'The host did not respond in time. Your card was not charged.',
+        title: 'Booking rejected',
+        body: datePassed
+          ? 'The booking date passed without provider acceptance. Your card authorization was released.'
+          : 'The host did not respond in time. Your card was not charged.',
         data: {
           bookingId: booking._id.toString(),
-          listingId: booking.listing ? booking.listing.toString() : '',
+          listingId,
         },
       }).catch((error) => console.error('Failed to notify guest of auto-decline.', error));
 
       sendNotification(booking.host, {
         type: NOTIFICATION_TYPES.BOOKING_DECLINED,
-        title: 'Booking request expired',
-        body: 'A booking request expired because it was not answered in time.',
+        title: 'Booking request rejected',
+        body: datePassed
+          ? 'The booking date passed without your acceptance. The request was automatically rejected.'
+          : 'A booking request expired because it was not answered in time.',
         data: {
           bookingId: booking._id.toString(),
-          listingId: booking.listing ? booking.listing.toString() : '',
+          listingId,
         },
       }).catch((error) => console.error('Failed to notify host of auto-decline.', error));
     } catch (error) {
@@ -126,15 +141,20 @@ async function runOnce() {
 }
 
 function startBookingAuthExpiryJob() {
-  runOnce().catch((error) =>
-    console.error('booking-auth-expiry initial run failed:', error)
-  );
-
-  const handle = setInterval(() => {
-    runOnce().catch((error) =>
-      console.error('booking-auth-expiry interval run failed:', error)
-    );
-  }, RUN_INTERVAL_MS);
+  let running = false;
+  async function tick() {
+    if (running) return;
+    running = true;
+    try {
+      await runOnce();
+    } catch (error) {
+      console.error('booking-auth-expiry run failed:', error);
+    } finally {
+      running = false;
+    }
+  }
+  tick();
+  const handle = setInterval(tick, RUN_INTERVAL_MS);
 
   if (typeof handle.unref === 'function') {
     handle.unref();

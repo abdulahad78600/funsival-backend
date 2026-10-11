@@ -100,8 +100,8 @@ function validateHostBookingsQuery(query = {}) {
   };
 }
 
-// Guest "My Reservations" tabs: All / In progress / Completed / Cancelled
-const GUEST_RESERVATION_TABS = ['all', 'in_progress', 'completed', 'cancelled'];
+// Guest reservation tabs include separate Upcoming and In progress views.
+const GUEST_RESERVATION_TABS = ['all', 'upcoming', 'in_progress', 'completed', 'cancelled'];
 const GUEST_TAB_ALIASES = {
   'in-progress': 'in_progress',
   inprogress: 'in_progress',

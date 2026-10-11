@@ -7,6 +7,7 @@ const Listing = require('../../models/listing.model');
 const Withdrawal = require('../../models/withdrawal.model');
 const RefundRequest = require('../../models/refund-request.model');
 const ApiError = require('../../utils/api-error');
+const { hasBookingDatePassed } = require('../../utils/booking-clock');
 const {
   BOOKING_STATUS,
   PAYMENT_STATUS,
@@ -699,6 +700,13 @@ async function capturePaymentForBooking(bookingId, hostUserId) {
   if (booking.host.toString() !== hostUserId.toString()) {
     throw new ApiError(403, 'You are not allowed to accept this booking.');
   }
+  if (![BOOKING_STATUS.PENDING, BOOKING_STATUS.AWAITING_HOST_APPROVAL].includes(booking.status)) {
+    throw new ApiError(400, 'Only pending booking requests can be accepted.');
+  }
+  const listing = await Listing.findById(booking.listing);
+  if (hasBookingDatePassed(booking, listing)) {
+    throw new ApiError(400, 'The booking date has passed. This request can no longer be accepted.');
+  }
   if (!booking.stripePaymentIntentId || !booking.stripeAccountId) {
     throw new ApiError(400, 'Booking is missing Stripe payment information.');
   }
@@ -773,9 +781,16 @@ async function cancelAuthorizationForBooking(bookingId, actorUserId, reason) {
     throw new ApiError(400, 'Booking is missing Stripe payment information.');
   }
 
-  await stripe.paymentIntents.cancel(booking.stripePaymentIntentId, {
-    cancellation_reason: 'requested_by_customer',
-  });
+  try {
+    await stripe.paymentIntents.cancel(booking.stripePaymentIntentId, {
+      cancellation_reason: 'requested_by_customer',
+    });
+  } catch (error) {
+    // Stripe may already have released an expired authorization. Still persist
+    // the rejection, but never report captured funds as released.
+    const latest = await stripe.paymentIntents.retrieve(booking.stripePaymentIntentId);
+    if (latest.status !== 'canceled') throw error;
+  }
 
   booking.paymentStatus = PAYMENT_STATUS.AUTH_RELEASED;
   booking.status = isHost ? BOOKING_STATUS.DECLINED : BOOKING_STATUS.CANCELLED;
