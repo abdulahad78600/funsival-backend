@@ -7,6 +7,7 @@ const User = require('../../models/user.model');
 const { BOOKING_STATUS } = require('../../constants/booking');
 const ApiError = require('../../utils/api-error');
 const { serializeListingRecord } = require('../listings/listing-images');
+const { getBookingCompletionAt } = require('../../jobs/booking-completion');
 
 function buildEmptyReviewSummary() {
   return {
@@ -122,18 +123,8 @@ function serializeReview(review) {
 
 const REVIEW_WINDOW_DAYS = 7;
 
-function getBookingCompletionAt(booking) {
-  if (!booking) return null;
-  const date = new Date(booking.endDate || booking.startDate);
-  if (Number.isNaN(date.getTime())) return null;
-
-  const match = /^(\d{2}):(\d{2})$/.exec(String(booking.endTime || '23:59'));
-  date.setUTCHours(match ? Number(match[1]) : 23, match ? Number(match[2]) : 59, 0, 0);
-  return date;
-}
-
 function getReviewWindow(booking) {
-  const opensAt = getBookingCompletionAt(booking);
+  const opensAt = booking ? getBookingCompletionAt(booking) : null;
   if (!opensAt) return { opensAt: null, closesAt: null };
   return {
     opensAt,
@@ -142,7 +133,7 @@ function getReviewWindow(booking) {
 }
 
 function isBookingReviewable(booking, now = new Date()) {
-  if (!booking || booking.status !== BOOKING_STATUS.COMPLETED) return false;
+  if (!booking || ![BOOKING_STATUS.CONFIRMED, BOOKING_STATUS.COMPLETED].includes(booking.status)) return false;
 
   const { opensAt, closesAt } = getReviewWindow(booking);
   return Boolean(opensAt && closesAt && now >= opensAt && now <= closesAt);
