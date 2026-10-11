@@ -23,7 +23,7 @@ test('bookings are reviewable only after they end and during the seven-day revie
   const { isBookingReviewable } = reviewsService._private;
   const now = new Date('2026-10-02T12:00:00.000Z');
   const ended = { startDate: '2026-10-01', endDate: '2026-10-01', endTime: '10:00', status: 'confirmed' };
-  assert.equal(isBookingReviewable(ended, now), false);
+  assert.equal(isBookingReviewable(ended, now), true);
   assert.equal(isBookingReviewable({ ...ended, status: 'completed' }, now), true);
   assert.equal(isBookingReviewable({ ...ended, endDate: '2026-10-02', endTime: '14:00' }, now), false);
   assert.equal(isBookingReviewable({ ...ended, endDate: '2026-09-20' }, now), false);
@@ -183,4 +183,14 @@ test('a guest can delete their own review; strangers and missing reviews are rej
     Review.findOneAndDelete = originalFindOneAndDelete;
     Review.aggregate = originalAggregate;
   }
+});
+
+test('reviews open at 10 PM in the listing zone, even before completion job updates status', () => {
+  const { isBookingReviewable, getReviewWindow } = reviewsService._private;
+  const booking = { status: 'confirmed', startDate: '2026-10-11', endDate: '2026-10-11', endTime: '22:00', listing: { timeZone: 'Asia/Karachi' } };
+  assert.equal(getReviewWindow(booking).opensAt.toISOString(), '2026-10-11T17:00:00.000Z');
+  assert.equal(isBookingReviewable(booking, new Date('2026-10-11T16:59:59Z')), false);
+  assert.equal(isBookingReviewable(booking, new Date('2026-10-11T17:00:00Z')), true);
+  assert.equal(isBookingReviewable({ ...booking, status: 'completed' }, new Date('2026-10-11T17:12:00Z')), true);
+  assert.equal(isBookingReviewable(booking, new Date('2026-10-18T17:00:01Z')), false);
 });
