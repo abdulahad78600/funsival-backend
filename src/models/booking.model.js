@@ -12,6 +12,7 @@ const {
 
 const bookingSlotSchema = new mongoose.Schema(
   {
+    sourceDate: { type: String, default: undefined },
     startTime: {
       type: String,
       required: true,
@@ -34,6 +35,7 @@ const listingSnapshotSchema = new mongoose.Schema(
     location: { type: String, default: null },
     category: { type: String, default: null },
     photo: { type: String, default: null },
+    timeZone: { type: String, default: null },
   },
   { _id: false }
 );

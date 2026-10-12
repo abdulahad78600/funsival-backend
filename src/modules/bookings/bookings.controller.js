@@ -1,3 +1,4 @@
+const { presentBooking, presentBookingResult } = require('../../utils/viewer-schedule');
 const asyncHandler = require('../../utils/async-handler');
 const {
   validateBookingId,
@@ -25,18 +26,18 @@ const createBookingHandler = asyncHandler(async (req, res) => {
   res.status(201).json({
     success: true,
     message: 'Booking created. Complete payment via the returned checkout URL.',
-    data: result,
+    data: presentBookingResult(result, req.viewerTimeZone),
   });
 });
 
 const getBookingQuoteHandler = asyncHandler(async (req, res) => {
-  const payload = validateCreateBookingPayload(req.body);
+  const payload = validateCreateBookingPayload(req.body, { requirePaymentMethod: false });
   const quote = await getBookingQuote(payload, req.user.id);
 
   res.status(200).json({
     success: true,
     message: 'Booking quote generated successfully.',
-    data: quote,
+    data: presentBooking(quote, req.viewerTimeZone),
   });
 });
 
@@ -47,7 +48,7 @@ const getMyBookingsHandler = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Bookings fetched successfully.',
-    data: result,
+    data: presentBookingResult(result, req.viewerTimeZone),
   });
 });
 
@@ -58,7 +59,7 @@ const getHostBookingsHandler = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Host bookings fetched successfully.',
-    data: result,
+    data: presentBookingResult(result, req.viewerTimeZone),
   });
 });
 
@@ -93,7 +94,7 @@ const getBookingByIdHandler = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Booking fetched successfully.',
-    data: { booking },
+    data: { booking: presentBooking(booking, req.viewerTimeZone) },
   });
 });
 
@@ -104,7 +105,7 @@ const cancelBookingHandler = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Booking cancelled successfully.',
-    data: { booking },
+    data: { booking: presentBooking(booking, req.viewerTimeZone) },
   });
 });
 
@@ -115,7 +116,7 @@ const acceptBookingHandler = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Booking accepted. Guest card has been charged.',
-    data: { booking },
+    data: { booking: presentBooking(booking, req.viewerTimeZone) },
   });
 });
 
@@ -128,7 +129,7 @@ const declineBookingHandler = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Booking declined. Guest authorization has been released.',
-    data: { booking },
+    data: { booking: presentBooking(booking, req.viewerTimeZone) },
   });
 });
 

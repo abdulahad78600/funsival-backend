@@ -1,17 +1,11 @@
 const Booking = require("../models/booking.model");
 const { BOOKING_STATUS } = require("../constants/booking");
-const { calendarDate, resolveListingTimeZone, localBookingInstant } = require('../utils/booking-clock');
+const { bookingCompletionAt } = require('../utils/booking-clock');
 
 const RUN_INTERVAL_MS = 60 * 1000;
 
-function getBookingCompletionAt(booking) {
-  const date = new Date(booking?.endDate || booking?.startDate);
-  if (Number.isNaN(date.getTime())) return null;
-
-  const endTime = booking.slots?.length
-    ? booking.slots.map(slot => slot.endTime).filter(Boolean).sort().at(-1)
-    : booking.endTime;
-  return localBookingInstant(calendarDate(date), endTime || '23:59', resolveListingTimeZone(booking.listing || {}));
+function getBookingCompletionAt(booking, listing = booking?.listing) {
+  return bookingCompletionAt(booking, listing);
 }
 
 async function completeEndedBookings(now = new Date()) {

@@ -87,16 +87,35 @@ function isFutureStart(date, time, clock) {
 
 function assertBookingNotPast(listing, booking, now = new Date()) {
   const clock = listingClock(listing, now);
-  const starts = booking.slots?.length ? booking.slots.map(s => s.startTime) : [booking.startTime];
-  if (starts.some(time => !isFutureStart(booking.startDate, time, clock))) {
+  const starts = booking.slots?.length ? booking.slots : [{ startTime: booking.startTime }];
+  if (starts.some(slot => !isFutureStart(slot.sourceDate || booking.startDate, slot.startTime, clock))) {
     throw new ApiError(400, 'The selected booking date or start time is in the past in the listing time zone.', { timeZone: clock.timeZone });
   }
 }
 
 function hasBookingDatePassed(booking, listing = booking.listing, now = new Date()) {
-  const start = new Date(booking.startDate);
+  const start = new Date(booking.slots?.some(slot => slot.sourceDate) ? booking.endDate || booking.startDate : booking.startDate);
   if (Number.isNaN(start.getTime())) return false;
   return calendarDate(start) < listingClock(listing || {}, now).date;
+}
+
+function bookingCompletionAt(booking, listing = booking?.listing) {
+  const date = new Date(booking?.endDate || booking?.startDate);
+  if (Number.isNaN(date.getTime())) return null;
+  if (booking.slots?.some(slot => slot.sourceDate)) {
+    const ends = booking.slots.map(slot => localBookingInstant(slot.sourceDate || booking.startDate, slot.endTime, resolveListingTimeZone(listing || {}))).filter(Boolean);
+    return ends.length ? new Date(Math.max(...ends.map(end => end.getTime()))) : null;
+  }
+  const endTime = booking.slots?.length
+    ? booking.slots.map(slot => slot.endTime).filter(Boolean).sort().at(-1)
+    : booking.endTime;
+  return localBookingInstant(calendarDate(date), endTime || '23:59', resolveListingTimeZone(listing || {}));
+}
+
+function hasBookingRequestExpired(booking, listing = booking.listing, now = new Date()) {
+  const hasEndTime = booking.endTime || booking.slots?.some(slot => slot.endTime);
+  const end = hasEndTime ? bookingCompletionAt(booking, listing) : null;
+  return hasBookingDatePassed(booking, listing, now) || Boolean(end && end <= now);
 }
 
 // MongoDB uses the persisted listing zone, including daylight-saving rules,
@@ -120,4 +139,4 @@ function upcomingAvailabilityExpression(from, until) {
   } }] };
 }
 
-module.exports = { validTimeZone, calendarDate, isCalendarDate, resolveListingTimeZone, listingClock, localBookingInstant, isFutureStart, assertBookingNotPast, hasBookingDatePassed, upcomingAvailabilityExpression };
+module.exports = { validTimeZone, calendarDate, isCalendarDate, resolveListingTimeZone, listingClock, localBookingInstant, isFutureStart, assertBookingNotPast, hasBookingDatePassed, bookingCompletionAt, hasBookingRequestExpired, upcomingAvailabilityExpression };

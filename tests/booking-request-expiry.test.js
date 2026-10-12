@@ -45,7 +45,7 @@ test('past-date request releases its hold, persists rejection, and notifies both
   await expirePendingAuthorizations(new Date('2026-10-09T19:00:00Z'));
   assert.equal(b.status, 'declined');
   assert.equal(b.paymentStatus, 'auth_released');
-  assert.match(b.declineReason, /booking date passed/i);
+  assert.match(b.declineReason, /reservation expired/i);
   assert.equal(cancel.mock.callCount(), 1);
   assert.equal(notify.mock.callCount(), calls + 2);
   assert.deepEqual(notify.mock.calls.slice(calls).map(call => call.arguments[0]), ['guest-id', 'host-id']);
@@ -91,7 +91,7 @@ test('provider cannot capture an unaccepted booking after its local date', async
   t.mock.method(Booking, 'findById', async () => b);
   t.mock.method(Listing, 'findById', async () => b.listing);
   const capture = t.mock.method(stripe.paymentIntents, 'capture', async () => {});
-  await assert.rejects(payments.capturePaymentForBooking(b._id, b.host), /booking date has passed/);
+  await assert.rejects(payments.capturePaymentForBooking(b._id, b.host), /reservation has expired/);
   assert.equal(capture.mock.callCount(), 0);
 });
 
@@ -105,4 +105,63 @@ test('completion uses 8 PM in the listing zone, not 8 PM UTC', async (t) => {
   assert.equal(await completeEndedBookings(new Date('2026-10-11T14:59:59Z')), 0);
   assert.equal(update.mock.callCount(), 0);
   assert.equal(await completeEndedBookings(new Date('2026-10-11T15:00:00Z')), 1);
+});
+
+for (const actor of ['guest-id', 'host-id']) {
+  test(`ended reservation cannot be cancelled by ${actor}, without changing booking or payment`, async (t) => {
+    const { cancelBooking } = require('../src/modules/bookings/bookings.service');
+    t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-11T18:00:00Z') });
+    const b = booking({ status: 'confirmed', paymentStatus: 'held', listing: 'listing-id', startDate: new Date('2026-10-11'), startTime: '22:00', endTime: '23:00' });
+    const save = t.mock.method(b, 'save', async () => {});
+    t.mock.method(Booking, 'findById', async () => b);
+    t.mock.method(Listing, 'findById', async () => ({ placeLocation: { country: 'Pakistan', city: 'Lahore' } }));
+    const cancelPayment = t.mock.method(payments, 'cancelAuthorizationForBooking', async () => {});
+    const notificationCalls = notify.mock.callCount();
+    await assert.rejects(cancelBooking(b._id, actor), /Completed bookings cannot be cancelled/);
+    assert.equal(b.status, 'confirmed');
+    assert.equal(b.paymentStatus, 'held');
+    assert.equal(b.cancelledAt, undefined);
+    assert.equal(save.mock.callCount(), 0);
+    assert.equal(cancelPayment.mock.callCount(), 0);
+    assert.equal(notify.mock.callCount(), notificationCalls);
+  });
+}
+
+test('cancellation remains available one second before the listing-local end', async (t) => {
+  const { cancelBooking } = require('../src/modules/bookings/bookings.service');
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-11T17:59:59Z') });
+  const b = booking({ status: 'confirmed', paymentStatus: 'held', listing: 'listing-id', startDate: new Date('2026-10-11'), startTime: '22:00', endTime: '23:00' });
+  b.toJSON = () => ({ status: b.status, paymentStatus: b.paymentStatus });
+  t.mock.method(Booking, 'findById', async () => b);
+  t.mock.method(Listing, 'findById', async () => ({ timeZone: 'Asia/Karachi' }));
+  const result = await cancelBooking(b._id, b.bookedBy);
+  assert.equal(result.status, 'cancelled');
+});
+
+test('same-day 12–1 AM unaccepted request expires at 1 AM and releases authorization', async (t) => {
+  const { hasBookingRequestExpired } = require('../src/utils/booking-clock');
+  const b = booking({ startDate: new Date('2026-10-12'), startTime: '00:00', endTime: '01:00' });
+  const before = new Date('2026-10-11T19:59:59Z');
+  const ended = new Date('2026-10-11T20:00:00Z');
+  assert.equal(hasBookingRequestExpired(b, b.listing, before), false);
+  assert.equal(hasBookingRequestExpired(b, b.listing, ended), true);
+  candidates(t, [b]);
+  t.mock.method(Booking, 'findById', async () => b);
+  const cancel = t.mock.method(stripe.paymentIntents, 'cancel', async () => ({ status: 'canceled' }));
+  await expirePendingAuthorizations(before);
+  assert.equal(cancel.mock.callCount(), 0);
+  await expirePendingAuthorizations(ended);
+  assert.equal(cancel.mock.callCount(), 1);
+  assert.equal(b.status, 'declined');
+  assert.equal(b.paymentStatus, 'auth_released');
+});
+
+test('provider cannot accept the same-day request at its end time', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-10-11T20:00:00Z') });
+  const b = booking({ startDate: new Date('2026-10-12'), startTime: '00:00', endTime: '01:00' });
+  t.mock.method(Booking, 'findById', async () => b);
+  t.mock.method(Listing, 'findById', async () => b.listing);
+  const capture = t.mock.method(stripe.paymentIntents, 'capture', async () => {});
+  await assert.rejects(payments.capturePaymentForBooking(b._id, b.host), /reservation has expired/);
+  assert.equal(capture.mock.callCount(), 0);
 });

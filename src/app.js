@@ -73,6 +73,7 @@ const corsOptions = {
     'Content-Type',
     'Authorization',
     'Idempotency-Key',
+    'X-Time-Zone',
     'ngrok-skip-browser-warning',
   ],
 };
@@ -116,7 +117,7 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.use('/api/v1', apiRoutes);
+app.use('/api/v1', require('./middlewares/viewer-timezone.middleware'), apiRoutes);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

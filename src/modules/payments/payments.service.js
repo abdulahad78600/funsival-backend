@@ -7,7 +7,7 @@ const Listing = require('../../models/listing.model');
 const Withdrawal = require('../../models/withdrawal.model');
 const RefundRequest = require('../../models/refund-request.model');
 const ApiError = require('../../utils/api-error');
-const { hasBookingDatePassed } = require('../../utils/booking-clock');
+const { hasBookingRequestExpired } = require('../../utils/booking-clock');
 const {
   BOOKING_STATUS,
   PAYMENT_STATUS,
@@ -704,8 +704,8 @@ async function capturePaymentForBooking(bookingId, hostUserId) {
     throw new ApiError(400, 'Only pending booking requests can be accepted.');
   }
   const listing = await Listing.findById(booking.listing);
-  if (hasBookingDatePassed(booking, listing)) {
-    throw new ApiError(400, 'The booking date has passed. This request can no longer be accepted.');
+  if (hasBookingRequestExpired(booking, listing)) {
+    throw new ApiError(400, 'The reservation has expired. This request can no longer be accepted.');
   }
   if (!booking.stripePaymentIntentId || !booking.stripeAccountId) {
     throw new ApiError(400, 'Booking is missing Stripe payment information.');

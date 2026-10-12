@@ -1,3 +1,5 @@
+const { localSchedule, localAvailabilityDates } = require('../../utils/viewer-schedule');
+const { validTimeZone } = require('../../utils/booking-clock');
 const mongoose = require('mongoose');
 const { listingClock, calendarDate, isCalendarDate, isFutureStart, upcomingAvailabilityExpression } = require('../../utils/booking-clock');
 
@@ -828,7 +830,7 @@ async function getBookedIntervalsForDate(listingId, dayStart) {
     bookingType: { $in: [BOOKING_TYPES.HOURLY, BOOKING_TYPES.PER_HOUR] },
     startDate: { $lt: dayEnd },
     endDate: { $gte: dayStart },
-  }).select('startTime endTime slots');
+  }).select('startDate endDate startTime endTime slots');
 
   return activeBookings.flatMap((booking) => {
     const slots =
@@ -836,7 +838,7 @@ async function getBookedIntervalsForDate(listingId, dayStart) {
         ? booking.slots
         : [{ startTime: booking.startTime, endTime: booking.endTime }];
     return slots
-      .filter((slot) => slot.startTime && slot.endTime)
+      .filter((slot) => slot.startTime && slot.endTime && (!slot.sourceDate || slot.sourceDate === calendarDate(dayStart)))
       .map((slot) => ({
         start: timeStringToMinutes(slot.startTime),
         end: timeStringToMinutes(slot.endTime),
@@ -844,7 +846,7 @@ async function getBookedIntervalsForDate(listingId, dayStart) {
   });
 }
 
-async function getAvailableSlotsForListing(listingId, dateInput) {
+async function getAvailableSlotsForListing(listingId, dateInput, { viewerTimeZone = null, dateInViewerZone = false } = {}) {
   const requestedDate = new Date(dateInput);
   if (!isCalendarDate(dateInput)) {
     throw new ApiError(400, 'A valid `date` query parameter is required (YYYY-MM-DD).');
@@ -855,19 +857,28 @@ async function getAvailableSlotsForListing(listingId, dateInput) {
     throw new ApiError(404, 'Listing not found.');
   }
 
+  if (viewerTimeZone && !validTimeZone(viewerTimeZone)) {
+    throw new ApiError(400, 'A valid viewer timezone is required.');
+  }
+  if (dateInViewerZone && !viewerTimeZone) {
+    throw new ApiError(400, 'X-Time-Zone is required when dateZone is viewer.');
+  }
   const dayStart = startOfUtcDay(requestedDate);
   const clock = listingClock(listing);
-  if (calendarDate(requestedDate) < clock.date) {
-    throw new ApiError(400, 'The selected date is in the past in the listing time zone.');
+  const day = calendarDate(requestedDate);
+  const viewerClock = viewerTimeZone ? listingClock({ timeZone: viewerTimeZone }) : clock;
+  if (day < (dateInViewerZone ? viewerClock.date : clock.date)) {
+    throw new ApiError(400, 'The selected date is in the past.');
   }
-  const windows = (listing.availability || []).filter(
-    (entry) =>
-      entry.isAvailable !== false &&
-      entry.date &&
-      startOfUtcDay(entry.date).getTime() === dayStart.getTime()
-  );
+  const sourceDates = dateInViewerZone
+    ? localAvailabilityDates(listing, viewerTimeZone)[day] || [] : [day];
+  const windows = (listing.availability || []).filter(entry =>
+    entry.isAvailable !== false && entry.date && sourceDates.includes(calendarDate(entry.date)));
 
-  const slotDurationMinutes = resolveSlotDurationMinutes(listing);
+  const duration = resolveSlotDurationMinutes(listing);
+  // Hourly clients previously grouped short slots into one-hour selections.
+  const slotDurationMinutes = dateInViewerZone && listing.bookingType === BOOKING_TYPES.PER_HOUR
+    ? Math.max(60, duration) : duration;
   const hourlyPrice =
     listing.price && Number.isFinite(listing.price.hourly)
       ? listing.price.hourly
@@ -877,13 +888,14 @@ async function getAvailableSlotsForListing(listingId, dateInput) {
       ? Number(((hourlyPrice * slotDurationMinutes) / 60).toFixed(2))
       : null;
 
-  const bookedIntervals =
-    windows.length > 0
-      ? await getBookedIntervalsForDate(listing._id, dayStart)
-      : [];
+  const intervalsByDate = new Map(await Promise.all(sourceDates.map(async sourceDate => [
+    sourceDate, await getBookedIntervalsForDate(listing._id, startOfUtcDay(sourceDate)),
+  ])));
 
   const slots = [];
   for (const window of windows) {
+    const sourceDate = calendarDate(window.date);
+    const bookedIntervals = intervalsByDate.get(sourceDate) || [];
     const windowStart = timeStringToMinutes(window.startTime);
     const windowEnd = timeStringToMinutes(window.endTime);
 
@@ -897,21 +909,29 @@ async function getAvailableSlotsForListing(listingId, dateInput) {
         (booked) => slotStart < booked.end && booked.start < slotEnd
       );
 
-      slots.push({
+      const slot = {
         startTime: minutesToTimeString(slotStart),
         endTime: minutesToTimeString(slotEnd),
         durationMinutes: slotDurationMinutes,
         price: pricePerSlot,
-        available: !isBooked && isFutureStart(dayStart, minutesToTimeString(slotStart), clock),
-      });
+        available: !isBooked && isFutureStart(sourceDate, minutesToTimeString(slotStart), clock),
+      };
+      if (viewerTimeZone) {
+        slot.sourceDate = sourceDate;
+        slot.localSchedule = localSchedule({ startDate: sourceDate, ...slot, timeZone: clock.timeZone }, viewerTimeZone);
+      }
+      if (!dateInViewerZone || slot.localSchedule?.ranges[0]?.startDate === day) slots.push(slot);
     }
   }
 
   slots.sort(
-    (a, b) => timeStringToMinutes(a.startTime) - timeStringToMinutes(b.startTime)
+    (a, b) => viewerTimeZone
+      ? String(a.localSchedule?.ranges[0]?.startAt || '').localeCompare(String(b.localSchedule?.ranges[0]?.startAt || ''))
+      : timeStringToMinutes(a.startTime) - timeStringToMinutes(b.startTime)
   );
 
   return {
+    viewerTimeZone,
     listingId: listing._id.toString(),
     timeZone: clock.timeZone,
     date: dayStart.toISOString().slice(0, 10),
