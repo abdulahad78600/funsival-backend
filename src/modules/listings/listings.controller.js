@@ -1,3 +1,4 @@
+const { localAvailabilityDates, dailyAvailabilityOptions, activityAvailabilityOptions } = require('../../utils/viewer-schedule');
 const asyncHandler = require('../../utils/async-handler');
 const ApiError = require('../../utils/api-error');
 const { validateListingId } = require('./listings.validation');
@@ -185,14 +186,20 @@ const getPublicListingByIdHandler = asyncHandler(async (req, res) => {
     success: true,
     message: 'Listing fetched successfully.',
     data: {
-      listing,
+      listing: { ...listing, viewerTimeZone: req.viewerTimeZone,
+        dailyAvailability: dailyAvailabilityOptions(listing, req.viewerTimeZone),
+        activityAvailability: activityAvailabilityOptions(listing, req.viewerTimeZone),
+        localAvailabilityDates: localAvailabilityDates(listing, req.viewerTimeZone) },
     },
   });
 });
 
 const getListingSlotsHandler = asyncHandler(async (req, res) => {
   const listingId = validateListingId(req.params.listingId);
-  const result = await getAvailableSlotsForListing(listingId, req.query.date);
+  const result = await getAvailableSlotsForListing(listingId, req.query.date, {
+    viewerTimeZone: req.viewerTimeZone,
+    dateInViewerZone: req.query.dateZone === 'viewer',
+  });
 
   res.status(200).json({
     success: true,

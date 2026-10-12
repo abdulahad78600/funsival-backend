@@ -125,7 +125,7 @@ function validateGuestBookingsQuery(query = {}) {
   return { page, limit, tab };
 }
 
-const AVAILABLE_PRICING_MODES = ['hourly', 'daily'];
+const AVAILABLE_PRICING_MODES = ['hourly', 'daily', 'per_person'];
 
 const MAX_SLOTS_PER_BOOKING = 48;
 
@@ -134,7 +134,7 @@ function timeToMinutes(time) {
   return hours * 60 + minutes;
 }
 
-function validateSlots(rawSlots, errors) {
+function validateSlots(rawSlots, errors, bookingDate) {
   if (rawSlots === undefined || rawSlots === null) {
     return null;
   }
@@ -164,13 +164,18 @@ function validateSlots(rawSlots, errors) {
       return null;
     }
 
-    parsed.push({ startTime, endTime });
+    if (slot.sourceDate !== undefined && (typeof slot.sourceDate !== 'string' || !isCalendarDate(slot.sourceDate))) {
+      errors.slots = `Slot ${index + 1} must have a valid sourceDate (YYYY-MM-DD).`;
+      return null;
+    }
+    parsed.push({ startTime, endTime, ...(slot.sourceDate !== undefined ? { sourceDate: String(slot.sourceDate).slice(0, 10) } : {}) });
   }
 
-  parsed.sort((a, b) => timeToMinutes(a.startTime) - timeToMinutes(b.startTime));
+  parsed.sort((a, b) => String(a.sourceDate || bookingDate).localeCompare(String(b.sourceDate || bookingDate)) || timeToMinutes(a.startTime) - timeToMinutes(b.startTime));
 
   for (let index = 1; index < parsed.length; index += 1) {
     if (
+      (parsed[index].sourceDate || bookingDate) === (parsed[index - 1].sourceDate || bookingDate) &&
       timeToMinutes(parsed[index].startTime) <
       timeToMinutes(parsed[index - 1].endTime)
     ) {
@@ -182,7 +187,7 @@ function validateSlots(rawSlots, errors) {
   return parsed;
 }
 
-function validateCreateBookingPayload(payload = {}) {
+function validateCreateBookingPayload(payload = {}, { requirePaymentMethod = true } = {}) {
   const errors = {};
 
   const listingId = normalizeString(payload.listingId);
@@ -198,7 +203,7 @@ function validateCreateBookingPayload(payload = {}) {
   const durationDays = payload.durationDays;
   const includeDelivery = Boolean(payload.includeDelivery);
   const paymentMethodId = normalizeString(payload.paymentMethodId);
-  const slots = validateSlots(payload.slots, errors);
+  const slots = validateSlots(payload.slots, errors, String(startDate || "").slice(0, 10));
 
   if (!listingId) {
     errors.listingId = 'Listing ID is required.';
@@ -250,9 +255,9 @@ function validateCreateBookingPayload(payload = {}) {
     }
   }
 
-  if (!paymentMethodId) {
+  if (!paymentMethodId && requirePaymentMethod) {
     errors.paymentMethodId = 'Please select a saved card to pay with.';
-  } else if (!paymentMethodId.startsWith('pm_')) {
+  } else if (paymentMethodId && !paymentMethodId.startsWith('pm_')) {
     errors.paymentMethodId = 'Payment method ID is invalid.';
   }
 

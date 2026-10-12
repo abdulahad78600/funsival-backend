@@ -6,7 +6,7 @@ const {
 const paymentsService = require('../modules/payments/payments.service');
 const { sendNotification } = require('../modules/notifications/notifications.service');
 const { NOTIFICATION_TYPES } = require('../modules/notifications/notifications.validation');
-const { hasBookingDatePassed } = require('../utils/booking-clock');
+const { hasBookingRequestExpired } = require('../utils/booking-clock');
 
 const RUN_INTERVAL_MS = 60 * 1000;
 const EXPIRY_BUFFER_MS = 12 * 60 * 60 * 1000; // act 12h before Stripe auto-voids
@@ -63,24 +63,24 @@ async function expirePendingAuthorizations(now = new Date()) {
   }).populate('listing', 'timeZone placeLocation').sort({ startDate: 1 }).limit(500);
 
   for (const booking of bookings) {
-    const datePassed = hasBookingDatePassed(booking, booking.listing, now);
+    const requestExpired = hasBookingRequestExpired(booking, booking.listing, now);
     const authorizationExpiring = booking.authExpiresAt && booking.authExpiresAt <= cutoff;
-    if (!datePassed && !authorizationExpiring) continue;
+    if (!requestExpired && !authorizationExpiring) continue;
     const listingId = (booking.listing?._id || booking.listing?.id || booking.listing)?.toString() || '';
     try {
       await paymentsService.cancelAuthorizationForBooking(
         booking._id,
         booking.host,
-        datePassed
-          ? 'Automatically rejected: booking date passed without provider acceptance.'
+        requestExpired
+          ? 'Automatically rejected: reservation expired without provider acceptance.'
           : 'Auto-declined: host did not respond in time.'
       );
 
       sendNotification(booking.bookedBy, {
         type: NOTIFICATION_TYPES.BOOKING_DECLINED,
         title: 'Booking rejected',
-        body: datePassed
-          ? 'The booking date passed without provider acceptance. Your card authorization was released.'
+        body: requestExpired
+          ? 'The reservation expired without provider acceptance. Your card authorization was released.'
           : 'The host did not respond in time. Your card was not charged.',
         data: {
           bookingId: booking._id.toString(),
@@ -91,8 +91,8 @@ async function expirePendingAuthorizations(now = new Date()) {
       sendNotification(booking.host, {
         type: NOTIFICATION_TYPES.BOOKING_DECLINED,
         title: 'Booking request rejected',
-        body: datePassed
-          ? 'The booking date passed without your acceptance. The request was automatically rejected.'
+        body: requestExpired
+          ? 'The reservation expired without your acceptance. The request was automatically rejected.'
           : 'A booking request expired because it was not answered in time.',
         data: {
           bookingId: booking._id.toString(),

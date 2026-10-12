@@ -5,7 +5,7 @@ const RefundRequest = require('../../models/refund-request.model');
 const Listing = require('../../models/listing.model');
 const User = require('../../models/user.model');
 const ApiError = require('../../utils/api-error');
-const { assertBookingNotPast } = require('../../utils/booking-clock');
+const { assertBookingNotPast, resolveListingTimeZone, calendarDate } = require('../../utils/booking-clock');
 const { sendMail } = require('../../services/mail.service');
 const {
   BOOKING_TYPES,
@@ -84,7 +84,14 @@ function resolveBookingType(payload, listing) {
   const mode = String(payload.pricingMode || '').trim().toLowerCase();
   const price = (listing && listing.price) || {};
 
+  if (mode === 'per_person' && hasConfiguredPrice(price.perPerson)) return BOOKING_TYPES.PER_PERSON;
   if (category === LISTING_CATEGORIES.ACTIVITY) {
+    if (mode === 'hourly' && hasConfiguredPrice(price.hourly)) return BOOKING_TYPES.HOURLY;
+    if (mode === 'daily' && hasConfiguredPrice(price.daily)) return BOOKING_TYPES.DAILY;
+    if (mode === '' && !hasConfiguredPrice(price.perPerson)) {
+      if (hasConfiguredPrice(price.hourly)) return BOOKING_TYPES.HOURLY;
+      if (hasConfiguredPrice(price.daily)) return BOOKING_TYPES.DAILY;
+    }
     return BOOKING_TYPES.PER_PERSON;
   }
   if (
@@ -165,6 +172,13 @@ function expandBookingTimes(payload, bookingType) {
     if (bookingHasSlots(expanded)) {
       // Slots are already sorted and non-overlapping (payload validation).
       // The overall window spans from the first slot to the last one.
+      const defaultSlotDate = calendarDate(expanded.startDate);
+      const hasDatedSlots = expanded.slots.some(slot => slot.sourceDate);
+      expanded.slots = expanded.slots.map(slot => hasDatedSlots ? { ...slot, sourceDate: slot.sourceDate || defaultSlotDate } : slot).sort((a, b) =>
+        String(a.sourceDate || calendarDate(expanded.startDate)).localeCompare(String(b.sourceDate || calendarDate(expanded.startDate)))
+        || a.startTime.localeCompare(b.startTime));
+      expanded.endDate = new Date(expanded.slots.at(-1).sourceDate || expanded.startDate);
+      expanded.startDate = new Date(expanded.slots[0].sourceDate || expanded.startDate);
       expanded.startTime = expanded.slots[0].startTime;
       expanded.endTime = expanded.slots[expanded.slots.length - 1].endTime;
     } else if (expanded.startTime && expanded.durationHours && !expanded.endTime) {
@@ -174,8 +188,10 @@ function expandBookingTimes(payload, bookingType) {
     if (expanded.durationDays && !expanded.endDate) {
       expanded.endDate = addDaysToDate(expanded.startDate, expanded.durationDays - 1);
     }
-    expanded.startTime = null;
-    expanded.endTime = null;
+    // Preserve supplied pickup/return times so daily schedules can be
+    // converted and completed at the same instants shown to the guest.
+    expanded.startTime = expanded.startTime || null;
+    expanded.endTime = expanded.endTime || expanded.startTime;
   } else if (bookingType === BOOKING_TYPES.PER_PERSON) {
     if (!expanded.endDate) {
       expanded.endDate = expanded.startDate;
@@ -367,6 +383,7 @@ function getRequestedIntervals(resolved) {
   return slots
     .filter((slot) => slot.startTime && slot.endTime)
     .map((slot) => ({
+      sourceDate: slot.sourceDate || calendarDate(resolved.startDate),
       startTime: slot.startTime,
       endTime: slot.endTime,
       start: timeStringToMinutes(slot.startTime),
@@ -379,23 +396,13 @@ function intervalsOverlap(aStart, aEnd, bStart, bEnd) {
 }
 
 function ensureSlotsWithinListingAvailability(listing, resolved, requested) {
-  const dayStart = startOfUtcDay(resolved.startDate).getTime();
-
-  const windows = (listing.availability || []).filter(
-    (entry) =>
-      entry.isAvailable !== false &&
-      entry.date &&
-      startOfUtcDay(entry.date).getTime() === dayStart
-  );
-
-  if (windows.length === 0) {
-    throw new ApiError(400, 'This listing is not available on the selected date.');
-  }
+  const windows = (listing.availability || []).filter(entry => entry.isAvailable !== false && entry.date);
 
   const outside = requested.filter(
     (slot) =>
       !windows.some(
         (window) =>
+          slot.sourceDate === calendarDate(window.date) &&
           slot.start >= timeStringToMinutes(window.startTime) &&
           slot.end <= timeStringToMinutes(window.endTime)
       )
@@ -410,7 +417,7 @@ function ensureSlotsWithinListingAvailability(listing, resolved, requested) {
 
 async function ensureHourlySlotsNotBooked(listing, resolved, requested) {
   const dayStart = startOfUtcDay(resolved.startDate);
-  const dayEnd = new Date(dayStart);
+  const dayEnd = new Date(resolved.endDate || resolved.startDate);
   dayEnd.setUTCDate(dayEnd.getUTCDate() + 1);
 
   const activeBookings = await Booking.find({
@@ -425,7 +432,7 @@ async function ensureHourlySlotsNotBooked(listing, resolved, requested) {
     bookingType: { $in: [BOOKING_TYPES.HOURLY, BOOKING_TYPES.PER_HOUR] },
     startDate: { $lt: dayEnd },
     endDate: { $gte: dayStart },
-  }).select('startTime endTime slots');
+  }).select('startDate endDate startTime endTime slots');
 
   const bookedIntervals = activeBookings.flatMap((booking) => {
     const slots =
@@ -435,6 +442,7 @@ async function ensureHourlySlotsNotBooked(listing, resolved, requested) {
     return slots
       .filter((slot) => slot.startTime && slot.endTime)
       .map((slot) => ({
+        sourceDate: slot.sourceDate || calendarDate(booking.startDate || resolved.startDate),
         start: timeStringToMinutes(slot.startTime),
         end: timeStringToMinutes(slot.endTime),
       }));
@@ -442,7 +450,7 @@ async function ensureHourlySlotsNotBooked(listing, resolved, requested) {
 
   const conflicting = requested.filter((slot) =>
     bookedIntervals.some((booked) =>
-      intervalsOverlap(slot.start, slot.end, booked.start, booked.end)
+      slot.sourceDate === booked.sourceDate && intervalsOverlap(slot.start, slot.end, booked.start, booked.end)
     )
   );
 
@@ -490,8 +498,7 @@ async function buildBookingQuote(payload, userId) {
   }
 
   validateBookingInputsForType(payload, listing, bookingType);
-  // Daily pricing strips the time fields below, but a supplied local start
-  // time still must be upcoming before that normalization happens.
+  // A supplied listing-local start must be upcoming for every pricing mode.
   assertBookingNotPast(listing, payload);
   const resolved = expandBookingTimes(payload, bookingType);
   assertBookingNotPast(listing, resolved);
@@ -511,6 +518,7 @@ async function getBookingQuote(payload, userId) {
 
   return {
     listingId: listing._id.toString(),
+    timeZone: resolveListingTimeZone(listing),
     category: listing.category,
     bookingType,
     pricingMode: resolved.pricingMode || null,
@@ -550,6 +558,7 @@ async function createBooking(payload, userId) {
   const booking = await Booking.create({
     listing: listing._id,
     listingSnapshot: {
+      timeZone: resolveListingTimeZone(listing),
       title: listing.basicInformation?.activityTitle || null,
       location: listing.basicInformation?.location || null,
       category: listing.category || null,
@@ -689,8 +698,8 @@ function guestReservationTimingStages() {
   return [
     { $lookup: { from: Listing.collection.name, localField: 'listing', foreignField: '_id', as: '_reservationListing' } },
     { $set: {
-      _reservationStartAt: instant('$startDate', { $ifNull: [{ $min: '$slots.startTime' }, { $ifNull: ['$startTime', '00:00'] }] }),
-      _reservationEndAt: instant({ $ifNull: ['$endDate', '$startDate'] }, { $ifNull: [{ $max: '$slots.endTime' }, { $ifNull: ['$endTime', '23:59'] }] }),
+      _reservationStartAt: instant('$startDate', { $ifNull: ['$startTime', { $ifNull: [{ $min: '$slots.startTime' }, '00:00'] }] }),
+      _reservationEndAt: instant({ $ifNull: ['$endDate', '$startDate'] }, { $ifNull: ['$endTime', { $ifNull: [{ $max: '$slots.endTime' }, '23:59'] }] }),
     } },
   ];
 }
@@ -1394,10 +1403,9 @@ async function cancelBooking(bookingId, userId) {
     throw new ApiError(400, 'Completed bookings cannot be cancelled.');
   }
 
-  const completedAt = getBookingCompletionAt(booking);
-  if (booking.status === BOOKING_STATUS.CONFIRMED && completedAt && completedAt <= new Date()) {
-    booking.status = BOOKING_STATUS.COMPLETED;
-    await booking.save();
+  const listing = await Listing.findById(booking.listing);
+  const completedAt = getBookingCompletionAt(booking, listing);
+  if (completedAt && completedAt <= new Date()) {
     throw new ApiError(400, 'Completed bookings cannot be cancelled.');
   }
 
