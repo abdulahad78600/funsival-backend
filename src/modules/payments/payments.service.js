@@ -7,7 +7,7 @@ const Listing = require('../../models/listing.model');
 const Withdrawal = require('../../models/withdrawal.model');
 const RefundRequest = require('../../models/refund-request.model');
 const ApiError = require('../../utils/api-error');
-const { hasBookingRequestExpired } = require('../../utils/booking-clock');
+const { hasBookingRequestExpired, bookingCompletionAt } = require('../../utils/booking-clock');
 const {
   BOOKING_STATUS,
   PAYMENT_STATUS,
@@ -68,15 +68,12 @@ function calculatePaymentSplit(totalAmount, currency, applicationFeePercent = en
   };
 }
 
-function calculateBookingCompletionAt(booking) {
-  const dateValue = booking.endDate || booking.startDate;
-  const date = new Date(dateValue);
-  if (Number.isNaN(date.getTime())) return new Date();
-
-  const time = booking.endTime || '23:59';
-  const match = /^(\d{2}):(\d{2})$/.exec(String(time));
-  date.setUTCHours(match ? Number(match[1]) : 23, match ? Number(match[2]) : 59, 0, 0);
-  return date;
+function calculateBookingCompletionAt(booking, listing = booking.listing) {
+  const source = listing?.timeZone || listing?.placeLocation ? listing
+    : { timeZone: booking.listingSnapshot?.timeZone || 'UTC' };
+  const completion = bookingCompletionAt(booking, source);
+  if (!completion) throw new ApiError(400, 'Booking completion time is invalid.');
+  return completion;
 }
 
 function calculatePayoutEligibleAt(completedAt, delayDays = env.stripe.payoutDelayDays) {
@@ -543,7 +540,9 @@ async function markBookingPaid(booking, paymentIntent) {
 
   const paidAt = new Date();
   // Hold provider funds for the configured delay after the reservation ends.
-  const payoutEligibleAt = calculatePayoutEligibleAt(calculateBookingCompletionAt(booking));
+  const listing = booking.listingSnapshot?.timeZone ? null
+    : await Listing.findById(booking.listing).select('timeZone placeLocation');
+  const payoutEligibleAt = calculatePayoutEligibleAt(calculateBookingCompletionAt(booking, listing));
 
   booking.paymentStatus = PAYMENT_STATUS.HELD;
   applyPaymentFlowMetadata(booking, paymentIntent);
@@ -1562,6 +1561,17 @@ async function getMerchantBalance(userId) {
   // Make a balance read self-healing: if the minute job has not run yet,
   // release this merchant's already-eligible bookings before returning totals.
   await releaseEligibleBookingFunds({ limit: 100, hostId: userId });
+  let expectedBankDeposits = [];
+  let depositDateUnavailable = false;
+  try {
+    const payouts = await stripe.payouts.list({ limit: 100 }, { stripeAccount: accountId });
+    expectedBankDeposits = payouts.data
+      .filter(payout => ['pending', 'in_transit'].includes(payout.status) && payout.type === 'bank_account' && payout.arrival_date)
+      .map(payout => ({ id: payout.id, currency: payout.currency.toUpperCase(),
+        expectedDate: new Date(payout.arrival_date * 1000).toISOString().slice(0, 10),
+        amount: fromStripeAmount(payout.amount, payout.currency), status: payout.status, testMode: payout.livemode === false,
+      })).sort((a, b) => a.expectedDate.localeCompare(b.expectedDate));
+  } catch { depositDateUnavailable = true; }
   const [stripeBalance, heldBookings] = await Promise.all([
     stripe.balance.retrieve({}, { stripeAccount: accountId }),
     Booking.find({
@@ -1599,6 +1609,7 @@ async function getMerchantBalance(userId) {
         pending: fromStripeAmount(entry.pending, entry.currency),
         current: fromStripeAmount(entry.current, entry.currency),
         breakdown: {
+          platformHold: fromStripeAmount(entry.held, entry.currency),
           sevenDayHold: fromStripeAmount(entry.held, entry.currency),
           stripeProcessing: fromStripeAmount(entry.stripePending, entry.currency),
         },
@@ -1606,7 +1617,7 @@ async function getMerchantBalance(userId) {
     })
     .sort((a, b) => a.currency.localeCompare(b.currency));
 
-  return { accountId, balances };
+  return { accountId, balances, payoutDelayDays: env.stripe.payoutDelayDays, expectedBankDeposits, depositDateUnavailable };
 }
 
 function mapStripePayoutStatus(status) {
