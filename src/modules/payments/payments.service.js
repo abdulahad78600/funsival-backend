@@ -7,6 +7,7 @@ const Listing = require('../../models/listing.model');
 const Withdrawal = require('../../models/withdrawal.model');
 const RefundRequest = require('../../models/refund-request.model');
 const ApiError = require('../../utils/api-error');
+const { allocateWithdrawal } = require('../../utils/withdrawal-allocation');
 const { hasBookingRequestExpired, bookingCompletionAt } = require('../../utils/booking-clock');
 const {
   BOOKING_STATUS,
@@ -1327,6 +1328,8 @@ function bookingTransactionProject() {
     grossAmount: { $ifNull: ['$totalAmount', 0] },
     platformFee: { $ifNull: ['$applicationFeeAmount', 0] },
     paymentStatus: 1,
+    stripePaymentIntentId: 1,
+    stripeChargeId: 1,
     releasedAt: 1,
     refundedAt: 1,
     listing: 1,
@@ -1343,6 +1346,10 @@ function withdrawalTransactionProject() {
     amount: { $ifNull: ['$amount', 0] },
     status: 1,
     arrivalDate: 1,
+    stripePayoutId: 1,
+    bookingAllocations: 1,
+    allocationVersion: 1,
+    unallocatedAmount: 1,
     paidAt: 1,
     failedAt: 1,
     failureReason: 1,
@@ -1468,6 +1475,7 @@ async function listTransactions(
       return {
         id,
         type: 'withdrawal',
+        transactionId: row.stripePayoutId || null,
         direction: 'debit',
         status: row.status,
         amount: normalizeMoney(row.amount),
@@ -1476,6 +1484,11 @@ async function listTransactions(
         transactionDate: row.transactionDate,
         withdrawal: {
           id,
+          bookingIds: (row.bookingAllocations || []).map((entry) => String(entry.bookingId)),
+          bookingAllocations: (row.bookingAllocations || []).map((entry) => ({
+            bookingId: String(entry.bookingId), amount: entry.amount,
+          })),
+          unallocatedAmount: row.unallocatedAmount ?? null,
           arrivalDate: row.arrivalDate || null,
           paidAt: row.paidAt || null,
           failedAt: row.failedAt || null,
@@ -1498,6 +1511,7 @@ async function listTransactions(
     return {
       id,
       type: 'earning',
+      transactionId: row.stripePaymentIntentId || row.stripeChargeId || null,
       direction: 'credit',
       status: mapEarningStatus(row.paymentStatus),
       amount: normalizeMoney(row.amount),
@@ -1627,6 +1641,58 @@ function mapStripePayoutStatus(status) {
   return WITHDRAWAL_STATUS.PENDING;
 }
 
+async function reserveWithdrawalWithBookings(userId, { amountMinor, currency, accountId, idempotencyKey }) {
+  return mongoose.connection.transaction(async (session) => {
+    // This shared write makes concurrent requests retry with a fresh snapshot,
+    // preventing two withdrawals from reserving the same booking earnings.
+    await User.updateOne({ _id: userId }, { $inc: { withdrawalAllocationVersion: 1 } }, { session });
+    const existing = await Withdrawal.findOne({ host: userId, idempotencyKey }).session(session);
+    if (existing) return existing;
+
+    const now = new Date();
+    const bookings = await Booking.find({
+      host: userId,
+      currency,
+      $or: [
+        { paymentStatus: PAYMENT_STATUS.RELEASED, releasedAt: { $lte: now } },
+        { paymentFlow: PAYMENT_FLOW.DESTINATION_CHARGE, paymentStatus: PAYMENT_STATUS.HELD, paidAt: { $lte: now } },
+      ],
+    }).select('_id merchantAmount releasedAt paidAt').session(session).lean();
+    const withdrawals = await Withdrawal.find({
+      host: userId, currency, status: { $in: [WITHDRAWAL_STATUS.PENDING, WITHDRAWAL_STATUS.PAID] },
+    }).sort({ createdAt: 1, _id: 1 }).session(session).lean();
+
+    const credits = bookings.map((booking) => ({
+      id: String(booking._id),
+      amountMinor: toStripeAmount(booking.merchantAmount, currency),
+      availableAt: new Date(booking.releasedAt || booking.paidAt).getTime(),
+    })).sort((a, b) => a.availableAt - b.availableAt || a.id.localeCompare(b.id));
+    const debits = withdrawals.map((withdrawal) => ({
+      tracked: withdrawal.allocationVersion === 1,
+      amountMinor: toStripeAmount(withdrawal.amount, currency),
+      createdAt: new Date(withdrawal.createdAt).getTime(),
+      allocations: (withdrawal.bookingAllocations || []).map((entry) => ({
+        bookingId: String(entry.bookingId), amountMinor: toStripeAmount(entry.amount, currency),
+      })),
+    }));
+    const { allocations, unallocatedAmountMinor } = allocateWithdrawal(credits, debits, amountMinor);
+    const [withdrawal] = await Withdrawal.create([{
+      host: userId,
+      amount: fromStripeAmount(amountMinor, currency),
+      currency,
+      status: WITHDRAWAL_STATUS.PENDING,
+      stripeAccountId: accountId,
+      idempotencyKey,
+      allocationVersion: 1,
+      bookingAllocations: allocations.map((entry) => ({
+        bookingId: entry.bookingId, amount: fromStripeAmount(entry.amountMinor, currency),
+      })),
+      unallocatedAmount: fromStripeAmount(unallocatedAmountMinor, currency),
+    }], { session });
+    return withdrawal;
+  });
+}
+
 async function createWithdrawal(
   userId,
   { amount, currency, idempotencyKey }
@@ -1669,12 +1735,10 @@ async function createWithdrawal(
 
   if (!withdrawal) {
     try {
-      withdrawal = await Withdrawal.create({
-        host: userId,
-        amount: fromStripeAmount(amountMinor, normalizedCurrency),
+      withdrawal = await reserveWithdrawalWithBookings(userId, {
+        amountMinor,
         currency: normalizedCurrency,
-        status: WITHDRAWAL_STATUS.PENDING,
-        stripeAccountId: accountId,
+        accountId,
         idempotencyKey,
       });
     } catch (error) {

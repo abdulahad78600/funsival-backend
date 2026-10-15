@@ -39,6 +39,15 @@ const withdrawalSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    allocationVersion: { type: Number, default: null },
+    bookingAllocations: {
+      type: [new mongoose.Schema({
+        bookingId: { type: mongoose.Schema.Types.ObjectId, ref: 'Booking', required: true },
+        amount: { type: Number, required: true, min: 0 },
+      }, { _id: false })],
+      default: [],
+    },
+    unallocatedAmount: { type: Number, default: null, min: 0 },
     idempotencyKey: {
       type: String,
       trim: true,
@@ -67,6 +76,7 @@ const withdrawalSchema = new mongoose.Schema(
     toJSON: {
       transform: (doc, returnedObject) => {
         returnedObject.id = returnedObject._id.toString();
+        returnedObject.bookingIds = (returnedObject.bookingAllocations || []).map((entry) => String(entry.bookingId));
         delete returnedObject._id;
         delete returnedObject.idempotencyKey;
         return returnedObject;
