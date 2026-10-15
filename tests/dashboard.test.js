@@ -84,11 +84,15 @@ test('dashboard overview returns every card and panel required by the host dashb
           createdAt: new Date('2026-08-12T12:00:00.000Z'),
           startDate: new Date('2026-08-15T12:00:00.000Z'),
           endDate: new Date('2026-08-15T14:00:00.000Z'),
+          startTime: '17:00',
+          endTime: '18:00',
+          slots: [{ startTime: '17:00', endTime: '18:00' }],
           listing: {
             _id: '64b000000000000000000002',
             basicInformation: { activityTitle: 'ATV Quad Bike' },
             category: 'Equipment',
             type: 'ATV',
+            timeZone: 'Asia/Karachi',
             photos: ['https://example.com/atv.jpg'],
           },
           bookedBy: {
@@ -123,6 +127,10 @@ test('dashboard overview returns every card and panel required by the host dashb
     assert.deepEqual(overview.cards.reservations, { total: 12, pending: 2 });
     assert.deepEqual(overview.cards.pendingPayments, [{ currency: 'USD', amount: 1000 }]);
     assert.equal(overview.recentReservations[0].listing.title, 'ATV Quad Bike');
+    assert.equal(overview.recentReservations[0].listing.timeZone, 'Asia/Karachi');
+    assert.equal(overview.recentReservations[0].startTime, '17:00');
+    assert.equal(overview.recentReservations[0].endTime, '18:00');
+    assert.deepEqual(overview.recentReservations[0].slots, [{ startTime: '17:00', endTime: '18:00' }]);
     assert.equal(overview.listingPerformance.completed.percentage, 50);
     assert.equal(overview.listingPerformance.pending.percentage, 33.33);
     assert.equal(overview.listingPerformance.cancelled.percentage, 16.67);

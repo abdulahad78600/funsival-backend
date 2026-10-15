@@ -65,6 +65,10 @@ function mapRecentReservation(booking) {
     bookedAt: booking.createdAt,
     startDate: booking.startDate,
     endDate: booking.endDate,
+    startTime: booking.startTime,
+    endTime: booking.endTime,
+    slots: booking.slots,
+    listingSnapshot: { timeZone: booking.listingSnapshot?.timeZone || 'UTC' },
     listing: listing
       ? {
           id: String(listing._id),
@@ -74,6 +78,7 @@ function mapRecentReservation(booking) {
               : null,
           category: listing.category || null,
           type: listing.type || null,
+          timeZone: listing.timeZone || booking.listingSnapshot?.timeZone || 'UTC',
           image: Array.isArray(listing.photos) && listing.photos.length > 0
             ? listing.photos[0]
             : null,
@@ -194,8 +199,8 @@ async function getHostDashboardOverview(
       { $sort: { _id: 1 } },
     ]),
     Booking.find({ host: hostId })
-      .select('listing bookedBy status startDate endDate createdAt')
-      .populate('listing', 'basicInformation.activityTitle category type photos')
+      .select('listing bookedBy status startDate endDate startTime endTime slots listingSnapshot.timeZone createdAt')
+      .populate('listing', 'basicInformation.activityTitle category type photos timeZone')
       .populate('bookedBy', 'email providerProfile.firstName providerProfile.lastName')
       .sort({ createdAt: -1 })
       .limit(recentLimit)
