@@ -6,6 +6,36 @@ const Withdrawal = require('../src/models/withdrawal.model');
 const paymentsService = require('../src/modules/payments/payments.service');
 const { validateTransactionsQuery } = require('../src/modules/payments/payments.validation');
 
+test('transaction references use payment identifiers independently of booking IDs', async () => {
+  const originalAggregate = Booking.aggregate;
+  const bookingId = new mongoose.Types.ObjectId();
+  Booking.aggregate = async (pipeline) => {
+    if (pipeline.some((stage) => stage.$group)) return [{ _id: 'USD' }];
+    const project = pipeline.find((stage) => stage.$project).$project;
+    assert.equal(project.stripePaymentIntentId, 1);
+    assert.equal(project.stripeChargeId, 1);
+    const withdrawalProject = pipeline.find((stage) => stage.$unionWith)
+      .$unionWith.pipeline.find((stage) => stage.$project).$project;
+    assert.equal(withdrawalProject.stripePayoutId, 1);
+    return [{ transactions: [
+      { _id: bookingId, transactionType: 'earning', stripePaymentIntentId: 'pi_payment', stripeChargeId: 'ch_charge' },
+      { _id: new mongoose.Types.ObjectId(), transactionType: 'earning', stripeChargeId: 'ch_legacy' },
+      { _id: new mongoose.Types.ObjectId(), transactionType: 'earning' },
+      { _id: new mongoose.Types.ObjectId(), transactionType: 'withdrawal', stripePayoutId: 'po_payout',
+        bookingAllocations: [{ bookingId, amount: 90 }], unallocatedAmount: 0 },
+    ], metadata: [{ total: 4 }] }];
+  };
+  try {
+    const { transactions } = await paymentsService.listTransactions(new mongoose.Types.ObjectId());
+    assert.equal(transactions[0].booking.id, String(bookingId));
+    assert.deepEqual(transactions.map((row) => row.transactionId), ['pi_payment', 'ch_legacy', null, 'po_payout']);
+    assert.deepEqual(transactions[3].withdrawal.bookingIds, [String(bookingId)]);
+    assert.deepEqual(transactions[3].withdrawal.bookingAllocations, [{ bookingId: String(bookingId), amount: 90 }]);
+  } finally {
+    Booking.aggregate = originalAggregate;
+  }
+});
+
 test('transaction currency choices cover the host history independently of currency, type, and page', async () => {
   const hostId = new mongoose.Types.ObjectId();
   const originalBookingAggregate = Booking.aggregate;

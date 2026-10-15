@@ -145,6 +145,8 @@ const providerProfileSchema = new mongoose.Schema(
 
 const userSchema = new mongoose.Schema(
   {
+    // Serializes withdrawal allocations for a host within Mongo transactions.
+    withdrawalAllocationVersion: { type: Number, default: 0, select: false },
     role: {
       type: String,
       enum: Object.values(USER_ROLES),
@@ -280,6 +282,7 @@ const userSchema = new mongoose.Schema(
         delete returnedObject.twoFactorCode;
         delete returnedObject.twoFactorExpiresAt;
         delete returnedObject.deviceTokens;
+        delete returnedObject.withdrawalAllocationVersion;
         return returnedObject;
       },
     },
