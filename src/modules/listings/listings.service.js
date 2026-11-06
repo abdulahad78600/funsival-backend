@@ -631,18 +631,42 @@ async function browseListings({
     ? { [`price.${pricingMode}`]: sort === 'price-asc' ? 1 : -1 }
     : sortMap[sort] || sortMap.newest;
 
-  const [listings, total] = await Promise.all([
-    Listing.find(filter)
-      .populate('createdBy', 'email role agencyName city providerProfile')
-      .sort(sortOption)
-      .skip(skip)
-      .limit(limit),
-    Listing.countDocuments(filter),
-  ]);
+  let listings;
+  let total;
+  let bookingCountMap = new Map();
+  if (sort === 'popular') {
+    // Rank public browse results by successful bookings, then rating and recency.
+    // Cancelled and pending reservations are excluded by the shared count helper.
+    const matchingListings = await Listing.find(filter)
+      .populate('createdBy', 'email role agencyName city providerProfile');
+    total = matchingListings.length;
+    bookingCountMap = await buildListingBookingCountMap(matchingListings.map((listing) => listing._id));
+    matchingListings.sort((a, b) => {
+      const bookingDifference = (bookingCountMap.get(String(b._id)) || 0) -
+        (bookingCountMap.get(String(a._id)) || 0);
+      if (bookingDifference) return bookingDifference;
+      const ratingDifference = Number(b.averageRating || 0) - Number(a.averageRating || 0);
+      if (ratingDifference) return ratingDifference;
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+    listings = matchingListings.slice(skip, skip + limit);
+  } else {
+    [listings, total] = await Promise.all([
+      Listing.find(filter)
+        .populate('createdBy', 'email role agencyName city providerProfile')
+        .sort(sortOption)
+        .skip(skip)
+        .limit(limit),
+      Listing.countDocuments(filter),
+    ]);
+  }
 
   const totalPages = Math.ceil(total / limit);
 
-  const serializedListings = listings.map((listing) => serializeListingRecord(listing.toJSON()));
+  const serializedListings = listings.map((listing) => ({
+    ...serializeListingRecord(listing.toJSON()),
+    ...(sort === 'popular' ? { bookingCount: bookingCountMap.get(String(listing._id)) || 0 } : {}),
+  }));
   const withReviews = await attachReviewSummariesToListings(serializedListings);
 
   return {
